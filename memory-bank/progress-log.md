@@ -44,6 +44,10 @@ Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, and RPM packagin
 - Added `config.toml.example` with commented administrator guidance and a known-good demo-backed configuration
 - Added `est-server.service.example` with a known-good demo deployment unit and documented override usage
 - Adjusted normal server startup so runtime mode only prepares writable runtime directories instead of development-only project directories
+- Added `README.md` covering features, layout, build, run, validation, systemd deployment, and packaging
+- Created the public GitHub repository `krich11/est-pqc-server`
+- Committed the local project as `Initial est-pqc-server import`
+- Pushed `main` to `origin` on GitHub
 - Updated RPM packaging metadata in `Cargo.toml`
 - Generated `config.toml`
 - Generated `logs/env-check.log`
@@ -109,4 +113,4 @@ ml_dsa_supported = false
 - Upgrade the Linux host OpenSSL if PQ server-generated key algorithms such as ML-DSA must be validated there
 
 ## Next Step
-Proceed to release publication and any remaining Git tagging or GitHub release automation using the Linux-built RPM artifact, the successful Linux-hosted EST validation results, `demo/validation-report.md`, `config.toml.example`, and `est-server.service.example`.
+Proceed with any future release tagging, GitHub Releases publication, and follow-on development from the public repository `https://github.com/krich11/est-pqc-server`.

@@ -118,6 +118,12 @@ ml_dsa_supported = true
   - Linux-host `systemd-analyze verify` against a staged service unit
   - Linux-host EST endpoint success for `csrattrs` using the staged deployment
 
+## Repository Publication Completion
+- Added `README.md` with project overview, build/run instructions, validation workflow, configuration summary, deployment notes, and packaging guidance
+- Created the public GitHub repository `https://github.com/krich11/est-pqc-server`
+- Committed the local project as `Initial est-pqc-server import`
+- Pushed the local `main` branch to `origin`
+
 ## Immediate Next Phase
-- Proceed to release publication and any remaining Git tagging or GitHub release automation
+- Proceed with tagged releases, GitHub Releases publication, and continued feature work from `https://github.com/krich11/est-pqc-server`
 - Use the Linux-built RPM artifact, `demo/validation-report.md`, `config.toml.example`, and `est-server.service.example` as the current release evidence set

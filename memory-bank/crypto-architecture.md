@@ -122,7 +122,16 @@ The EST server runtime now supports configuration-file and CLI override control 
   - production deployments should replace demo credentials and then switch to a dedicated service account
 
 - The current release evidence set is:
-  - `demo/validation-report.md`
-  - `config.toml.example`
-  - `est-server.service.example`
-  - `est-server-0.1.0-1.x86_64.rpm`
+- `demo/validation-report.md`
+- `config.toml.example`
+- `est-server.service.example`
+- `est-server-0.1.0-1.x86_64.rpm`
+
+## Repository Publication
+- Public repository: `https://github.com/krich11/est-pqc-server`
+- Repository README now documents:
+  - build and runtime expectations
+  - EST endpoint coverage
+  - validation workflow
+  - administrator configuration and systemd deployment
+  - packaging workflow
