@@ -37,8 +37,6 @@ A Rust-based Enrollment over Secure Transport (EST) server aligned to RFC 7030, 
 - Rust toolchain
 - OpenSSL 3.x system library and CLI
 - `pkg-config`
-- Linux for authoritative build, QA, and packaging
-- macOS may be used for local editing and compile checks
 
 ## Build
 
@@ -94,7 +92,7 @@ Run validation:
 cargo run --release --bin test-client -- --validate-all --base-url https://127.0.0.1:8443
 ```
 
-The project also includes Linux-host validation against a remote test host and a generated validation report in `demo/validation-report.md`.
+The project also includes a generated validation report in `demo/validation-report.md`.
 
 ## systemd Deployment
 
@@ -120,7 +118,6 @@ cargo generate-rpm
 - No vendored OpenSSL or alternate crypto provider is used.
 - FIPS mode depends on host OpenSSL provider availability.
 - PQC capabilities used by this project require OpenSSL 3.5 or later.
-- The Linux validation host currently uses OpenSSL 3.0.2, so PQC algorithms are not available there.
 
 ## License
 
