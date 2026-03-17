@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::{
     body::Incoming,
-    header::{CONTENT_TYPE, HeaderName, RETRY_AFTER},
+    header::{HeaderName, CONTENT_TYPE, RETRY_AFTER},
     service::service_fn,
     Method, Request, Response, StatusCode,
 };
@@ -14,11 +14,15 @@ use openssl::{
     bn::BigNum,
     hash::MessageDigest,
     nid::Nid,
-    pkey::{PKey, Private},
+    pkey::{Id as PKeyId, PKey, Private},
     sha::sha256,
     ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVerifyMode, SslVersion},
-    x509::{X509Extension, X509Req, X509},
+    x509::{
+        extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage},
+        X509NameRef, X509Req, X509,
+    },
 };
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -35,7 +39,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_openssl::SslStream;
 use tracing::{error, info};
 
-const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const DEFAULT_OPENSSL_DIR: &str = "/opt/homebrew/opt/openssl@3.5";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_TLS_VERSION: &str = "TLS1.3";
@@ -50,6 +53,9 @@ const DEFAULT_ENROLLMENT_STORAGE_DIR: &str = "logs/enrollments";
 const DEFAULT_PENDING_ENROLLMENT_DIR: &str = "logs/pending";
 const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_RETRY_AFTER_SECONDS: u32 = 60;
+const DEFAULT_WEBUI_LISTEN_ADDRESS: &str = "127.0.0.1";
+const DEFAULT_WEBUI_ADMIN_USERNAME: &str = "admin";
+const DEFAULT_SYSTEMD_UNIT_NAME: &str = "est-server";
 
 const CSR_ATTRS_EMPTY_SEQUENCE: &[u8] = &[0x30, 0x00];
 const CONTENT_TRANSFER_ENCODING_HEADER: &str = "content-transfer-encoding";
@@ -61,6 +67,84 @@ const CSRATTRS_PATH: &str = "/.well-known/est/csrattrs";
 const SIMPLE_ENROLL_PATH: &str = "/.well-known/est/simpleenroll";
 const SIMPLE_REENROLL_PATH: &str = "/.well-known/est/simplereenroll";
 const SERVER_KEYGEN_PATH: &str = "/.well-known/est/serverkeygen";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum EnrollmentAction {
+    #[default]
+    Auto,
+    Manual,
+    Reject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct EnrollmentRule {
+    pub name: String,
+    pub match_subject_cn: Option<String>,
+    pub match_subject_ou: Option<String>,
+    pub match_subject_o: Option<String>,
+    pub match_san_dns: Option<String>,
+    pub match_san_email: Option<String>,
+    pub match_client_cert_issuer: Option<String>,
+    pub match_key_type: Option<String>,
+    pub action: EnrollmentAction,
+    pub reject_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EnrollmentConfig {
+    pub default_action: EnrollmentAction,
+    pub rules: Vec<EnrollmentRule>,
+}
+
+impl Default for EnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            default_action: EnrollmentAction::Auto,
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebUiAuthMode {
+    #[default]
+    Basic,
+    Mtls,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebUiConfig {
+    pub enabled: bool,
+    pub listen_address: String,
+    pub listen_port: u16,
+    pub tls_certificate_path: String,
+    pub tls_private_key_path: String,
+    pub auth_mode: WebUiAuthMode,
+    pub admin_username: String,
+    pub admin_password_hash: String,
+    pub systemd_unit_name: String,
+}
+
+impl Default for WebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_address: DEFAULT_WEBUI_LISTEN_ADDRESS.to_owned(),
+            listen_port: 9443,
+            tls_certificate_path: DEFAULT_TLS_CERTIFICATE_PATH.to_owned(),
+            tls_private_key_path: DEFAULT_TLS_PRIVATE_KEY_PATH.to_owned(),
+            auth_mode: WebUiAuthMode::Basic,
+            admin_username: DEFAULT_WEBUI_ADMIN_USERNAME.to_owned(),
+            admin_password_hash: String::new(),
+            systemd_unit_name: DEFAULT_SYSTEMD_UNIT_NAME.to_owned(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -84,6 +168,8 @@ pub struct ServerConfig {
     pub default_retry_after_seconds: u32,
     pub ml_kem_supported: bool,
     pub ml_dsa_supported: bool,
+    pub webui: WebUiConfig,
+    pub enrollment: EnrollmentConfig,
 }
 
 impl Default for ServerConfig {
@@ -108,6 +194,8 @@ impl Default for ServerConfig {
             default_retry_after_seconds: DEFAULT_RETRY_AFTER_SECONDS,
             ml_kem_supported: false,
             ml_dsa_supported: false,
+            webui: WebUiConfig::default(),
+            enrollment: EnrollmentConfig::default(),
         }
     }
 }
@@ -133,6 +221,15 @@ pub struct ServerConfigOverrides {
     pub default_retry_after_seconds: Option<u32>,
     pub ml_kem_supported: Option<bool>,
     pub ml_dsa_supported: Option<bool>,
+    pub webui_enabled: Option<bool>,
+    pub webui_listen_address: Option<String>,
+    pub webui_listen_port: Option<u16>,
+    pub webui_tls_certificate_path: Option<String>,
+    pub webui_tls_private_key_path: Option<String>,
+    pub webui_auth_mode: Option<WebUiAuthMode>,
+    pub webui_admin_username: Option<String>,
+    pub webui_admin_password_hash: Option<String>,
+    pub webui_systemd_unit_name: Option<String>,
 }
 
 #[derive(Clone)]
@@ -153,6 +250,54 @@ struct EstState {
     tls_private_key_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollmentRequestContext {
+    pub operation: String,
+    pub artifact_id: String,
+    pub subject_cn: Option<String>,
+    pub subject_ou: Option<String>,
+    pub subject_o: Option<String>,
+    pub san_dns: Vec<String>,
+    pub san_email: Vec<String>,
+    pub client_cert_issuer: Option<String>,
+    pub key_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PendingEnrollmentState {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingEnrollmentRecord {
+    pub operation: String,
+    pub artifact_id: String,
+    pub retry_after_seconds: u32,
+    pub state: PendingEnrollmentState,
+    pub matched_rule_name: Option<String>,
+    pub action: EnrollmentAction,
+    pub reject_reason: Option<String>,
+    pub context: EnrollmentRequestContext,
+}
+
+#[derive(Debug, Clone)]
+struct EnrollmentDecision {
+    action: EnrollmentAction,
+    matched_rule_name: Option<String>,
+    reject_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrollmentArtifactSummary {
+    pub operation: String,
+    pub artifact_id: String,
+    pub csr_path: String,
+    pub certificate_path: Option<String>,
+}
+
 #[derive(Debug, Error)]
 #[error("{message}")]
 struct HttpStatusError {
@@ -169,10 +314,6 @@ impl HttpStatusError {
             retry_after: None,
         }
     }
-}
-
-pub async fn run_server() -> Result<()> {
-    run_server_with_overrides(Path::new(DEFAULT_CONFIG_PATH), &ServerConfigOverrides::default()).await
 }
 
 pub async fn run_server_with_overrides(
@@ -199,7 +340,10 @@ pub async fn run_server_with_overrides(
 
     let state = Arc::new(load_state(config)?);
     let acceptor = Arc::new(build_ssl_acceptor(&state)?);
-    let bind_address = format!("{}:{}", state.config.listen_address, state.config.listen_port);
+    let bind_address = format!(
+        "{}:{}",
+        state.config.listen_address, state.config.listen_port
+    );
     let listener = TcpListener::bind(&bind_address)
         .await
         .with_context(|| format!("failed to bind EST listener on `{bind_address}`"))?;
@@ -294,6 +438,33 @@ fn apply_overrides(config: &mut ServerConfig, overrides: &ServerConfigOverrides)
     if let Some(value) = overrides.ml_dsa_supported {
         config.ml_dsa_supported = value;
     }
+    if let Some(value) = overrides.webui_enabled {
+        config.webui.enabled = value;
+    }
+    if let Some(value) = &overrides.webui_listen_address {
+        config.webui.listen_address.clone_from(value);
+    }
+    if let Some(value) = overrides.webui_listen_port {
+        config.webui.listen_port = value;
+    }
+    if let Some(value) = &overrides.webui_tls_certificate_path {
+        config.webui.tls_certificate_path.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_tls_private_key_path {
+        config.webui.tls_private_key_path.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_auth_mode {
+        config.webui.auth_mode = value.clone();
+    }
+    if let Some(value) = &overrides.webui_admin_username {
+        config.webui.admin_username.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_admin_password_hash {
+        config.webui.admin_password_hash.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_systemd_unit_name {
+        config.webui.systemd_unit_name.clone_from(value);
+    }
 }
 
 fn normalize_server_config(config: &mut ServerConfig) {
@@ -329,6 +500,21 @@ fn normalize_server_config(config: &mut ServerConfig) {
     }
     if config.pending_enrollment_dir.trim().is_empty() {
         config.pending_enrollment_dir = DEFAULT_PENDING_ENROLLMENT_DIR.to_owned();
+    }
+    if config.webui.listen_address.trim().is_empty() {
+        config.webui.listen_address = DEFAULT_WEBUI_LISTEN_ADDRESS.to_owned();
+    }
+    if config.webui.tls_certificate_path.trim().is_empty() {
+        config.webui.tls_certificate_path = config.tls_certificate_path.clone();
+    }
+    if config.webui.tls_private_key_path.trim().is_empty() {
+        config.webui.tls_private_key_path = config.tls_private_key_path.clone();
+    }
+    if config.webui.admin_username.trim().is_empty() {
+        config.webui.admin_username = DEFAULT_WEBUI_ADMIN_USERNAME.to_owned();
+    }
+    if config.webui.systemd_unit_name.trim().is_empty() {
+        config.webui.systemd_unit_name = DEFAULT_SYSTEMD_UNIT_NAME.to_owned();
     }
 }
 
@@ -378,6 +564,31 @@ fn validate_server_config(config: &ServerConfig) -> Result<()> {
     }
     if config.default_retry_after_seconds == 0 {
         bail!("default_retry_after_seconds must be greater than zero");
+    }
+    if config.webui.enabled {
+        if config.webui.listen_address.trim().is_empty() {
+            bail!("webui.listen_address must not be empty when WebUI is enabled");
+        }
+        if config.webui.listen_port == 0 {
+            bail!("webui.listen_port must be greater than zero when WebUI is enabled");
+        }
+        if config.webui.tls_certificate_path.trim().is_empty() {
+            bail!("webui.tls_certificate_path must not be empty when WebUI is enabled");
+        }
+        if config.webui.tls_private_key_path.trim().is_empty() {
+            bail!("webui.tls_private_key_path must not be empty when WebUI is enabled");
+        }
+        if config.webui.admin_username.trim().is_empty() {
+            bail!("webui.admin_username must not be empty when WebUI basic auth is enabled");
+        }
+        if matches!(config.webui.auth_mode, WebUiAuthMode::Basic)
+            && config.webui.admin_password_hash.trim().is_empty()
+        {
+            bail!("webui.admin_password_hash must not be empty when WebUI basic auth is enabled");
+        }
+        if config.webui.systemd_unit_name.trim().is_empty() {
+            bail!("webui.systemd_unit_name must not be empty when WebUI is enabled");
+        }
     }
 
     Ok(())
@@ -675,20 +886,6 @@ async fn handle_simple_enroll(
         "simpleenroll"
     };
 
-    if should_defer_enrollment(
-        &state.openssl_binary,
-        Path::new(&state.config.pending_enrollment_dir),
-        operation,
-        body,
-        prefer_async,
-        state.config.default_retry_after_seconds,
-    )? {
-        return Ok(accepted_response(
-            "enrollment request accepted for delayed processing",
-            state.config.default_retry_after_seconds,
-        ));
-    }
-
     let request = X509Req::from_der(body).map_err(|_| {
         HttpStatusError::new(StatusCode::BAD_REQUEST, "failed to parse PKCS#10 CSR")
     })?;
@@ -713,6 +910,86 @@ async fn handle_simple_enroll(
             )
         })?;
         ensure_same_subject_and_alt_name(&state.openssl_binary, &request, peer_certificate)?;
+    }
+
+    let context = build_enrollment_request_context(
+        &state.openssl_binary,
+        operation,
+        body,
+        &request,
+        &request_public_key,
+        connection_meta,
+    )?;
+    let pending_dir = Path::new(&state.config.pending_enrollment_dir);
+
+    if let Some(record) = load_pending_enrollment(pending_dir, operation, &context.artifact_id)? {
+        match record.state {
+            PendingEnrollmentState::Pending
+                if matches!(record.action, EnrollmentAction::Manual) =>
+            {
+                return Ok(accepted_response(
+                    "enrollment request accepted for manual authorization",
+                    record.retry_after_seconds,
+                ));
+            }
+            PendingEnrollmentState::Pending => {
+                remove_pending_enrollment(pending_dir, operation, &context.artifact_id)?;
+            }
+            PendingEnrollmentState::Rejected => {
+                return Err(HttpStatusError::new(
+                    StatusCode::FORBIDDEN,
+                    record
+                        .reject_reason
+                        .unwrap_or_else(|| "enrollment request was rejected".to_owned()),
+                )
+                .into());
+            }
+            PendingEnrollmentState::Approved => {
+                remove_pending_enrollment(pending_dir, operation, &context.artifact_id)?;
+            }
+        }
+    } else {
+        let decision = evaluate_enrollment_policy(&state.config.enrollment, &context)?;
+        match decision.action {
+            EnrollmentAction::Reject => {
+                return Err(HttpStatusError::new(
+                    StatusCode::FORBIDDEN,
+                    decision
+                        .reject_reason
+                        .unwrap_or_else(|| "enrollment request rejected by policy".to_owned()),
+                )
+                .into());
+            }
+            EnrollmentAction::Manual => {
+                persist_pending_enrollment(
+                    &state.openssl_binary,
+                    pending_dir,
+                    &context,
+                    &decision,
+                    state.config.default_retry_after_seconds,
+                    body,
+                )?;
+                return Ok(accepted_response(
+                    "enrollment request accepted for manual authorization",
+                    state.config.default_retry_after_seconds,
+                ));
+            }
+            EnrollmentAction::Auto if prefer_async => {
+                persist_pending_enrollment(
+                    &state.openssl_binary,
+                    pending_dir,
+                    &context,
+                    &decision,
+                    state.config.default_retry_after_seconds,
+                    body,
+                )?;
+                return Ok(accepted_response(
+                    "enrollment request accepted for delayed processing",
+                    state.config.default_retry_after_seconds,
+                ));
+            }
+            EnrollmentAction::Auto => {}
+        }
     }
 
     let issued_certificate = issue_certificate_from_request(
@@ -756,20 +1033,7 @@ async fn handle_server_keygen(
 ) -> Result<Response<Body>> {
     ensure_pkcs10_request(body)?;
 
-    if should_defer_enrollment(
-        &state.openssl_binary,
-        Path::new(&state.config.pending_enrollment_dir),
-        "serverkeygen",
-        body,
-        prefer_async,
-        state.config.default_retry_after_seconds,
-    )? {
-        return Ok(accepted_response(
-            "server-side key generation request accepted for delayed processing",
-            state.config.default_retry_after_seconds,
-        ));
-    }
-
+    let operation = "serverkeygen";
     let request = X509Req::from_der(body).map_err(|_| {
         HttpStatusError::new(StatusCode::BAD_REQUEST, "failed to parse PKCS#10 CSR")
     })?;
@@ -786,9 +1050,93 @@ async fn handle_server_keygen(
         .into());
     }
 
+    let context = build_enrollment_request_context(
+        &state.openssl_binary,
+        operation,
+        body,
+        &request,
+        &request_public_key,
+        connection_meta,
+    )?;
+    let pending_dir = Path::new(&state.config.pending_enrollment_dir);
+
+    if let Some(record) = load_pending_enrollment(pending_dir, operation, &context.artifact_id)? {
+        match record.state {
+            PendingEnrollmentState::Pending
+                if matches!(record.action, EnrollmentAction::Manual) =>
+            {
+                return Ok(accepted_response(
+                    "server-side key generation request accepted for manual authorization",
+                    record.retry_after_seconds,
+                ));
+            }
+            PendingEnrollmentState::Pending => {
+                remove_pending_enrollment(pending_dir, operation, &context.artifact_id)?;
+            }
+            PendingEnrollmentState::Rejected => {
+                return Err(HttpStatusError::new(
+                    StatusCode::FORBIDDEN,
+                    record.reject_reason.unwrap_or_else(|| {
+                        "server-side key generation request was rejected".to_owned()
+                    }),
+                )
+                .into());
+            }
+            PendingEnrollmentState::Approved => {
+                remove_pending_enrollment(pending_dir, operation, &context.artifact_id)?;
+            }
+        }
+    } else {
+        let decision = evaluate_enrollment_policy(&state.config.enrollment, &context)?;
+        match decision.action {
+            EnrollmentAction::Reject => {
+                return Err(HttpStatusError::new(
+                    StatusCode::FORBIDDEN,
+                    decision.reject_reason.unwrap_or_else(|| {
+                        "server-side key generation request rejected by policy".to_owned()
+                    }),
+                )
+                .into());
+            }
+            EnrollmentAction::Manual => {
+                persist_pending_enrollment(
+                    &state.openssl_binary,
+                    pending_dir,
+                    &context,
+                    &decision,
+                    state.config.default_retry_after_seconds,
+                    body,
+                )?;
+                return Ok(accepted_response(
+                    "server-side key generation request accepted for manual authorization",
+                    state.config.default_retry_after_seconds,
+                ));
+            }
+            EnrollmentAction::Auto if prefer_async => {
+                persist_pending_enrollment(
+                    &state.openssl_binary,
+                    pending_dir,
+                    &context,
+                    &decision,
+                    state.config.default_retry_after_seconds,
+                    body,
+                )?;
+                return Ok(accepted_response(
+                    "server-side key generation request accepted for delayed processing",
+                    state.config.default_retry_after_seconds,
+                ));
+            }
+            EnrollmentAction::Auto => {}
+        }
+    }
+
     let private_key_path = generate_server_key(&state.openssl_binary, &state.config.key_type)?;
-    let private_key_pem = fs::read(&private_key_path)
-        .with_context(|| format!("failed to read generated key `{}`", private_key_path.display()))?;
+    let private_key_pem = fs::read(&private_key_path).with_context(|| {
+        format!(
+            "failed to read generated key `{}`",
+            private_key_path.display()
+        )
+    })?;
     let private_key =
         PKey::private_key_from_pem(&private_key_pem).context("failed to parse generated key")?;
 
@@ -804,7 +1152,7 @@ async fn handle_server_keygen(
 
     let (stored_csr_path, stored_cert_path) = persist_enrollment_artifacts(
         Path::new(&state.config.enrollment_storage_dir),
-        "serverkeygen",
+        operation,
         body,
         &issued_certificate_pem,
     )?;
@@ -913,6 +1261,391 @@ fn ensure_same_subject_and_alt_name(
     Ok(())
 }
 
+fn build_enrollment_request_context(
+    openssl_binary: &str,
+    operation: &str,
+    body: &[u8],
+    request: &X509Req,
+    request_public_key: &PKey<impl openssl::pkey::HasPublic>,
+    connection_meta: &ConnectionMeta,
+) -> Result<EnrollmentRequestContext> {
+    let subject_cn = first_subject_entry(request.subject_name(), Nid::COMMONNAME)?;
+    let subject_ou = first_subject_entry(request.subject_name(), Nid::ORGANIZATIONALUNITNAME)?;
+    let subject_o = first_subject_entry(request.subject_name(), Nid::ORGANIZATIONNAME)?;
+
+    let san_entries = extract_subject_alt_names_from_csr(openssl_binary, request)?;
+    let san_dns = san_entries
+        .iter()
+        .filter_map(|value| value.strip_prefix("DNS:").map(ToOwned::to_owned))
+        .collect();
+    let san_email = san_entries
+        .iter()
+        .filter_map(|value| value.strip_prefix("email:").map(ToOwned::to_owned))
+        .collect();
+
+    let client_cert_issuer = connection_meta
+        .peer_certificate
+        .as_ref()
+        .and_then(|certificate| x509_name_to_string(certificate.issuer_name()).ok());
+
+    Ok(EnrollmentRequestContext {
+        operation: operation.to_owned(),
+        artifact_id: sha256_hex(body),
+        subject_cn,
+        subject_ou,
+        subject_o,
+        san_dns,
+        san_email,
+        client_cert_issuer,
+        key_type: public_key_type_label(request_public_key),
+    })
+}
+
+fn evaluate_enrollment_policy(
+    config: &EnrollmentConfig,
+    context: &EnrollmentRequestContext,
+) -> Result<EnrollmentDecision> {
+    for rule in &config.rules {
+        if rule_matches_context(rule, context)? {
+            return Ok(EnrollmentDecision {
+                action: rule.action.clone(),
+                matched_rule_name: (!rule.name.trim().is_empty()).then(|| rule.name.clone()),
+                reject_reason: rule.reject_reason.clone(),
+            });
+        }
+    }
+
+    Ok(EnrollmentDecision {
+        action: config.default_action.clone(),
+        matched_rule_name: None,
+        reject_reason: None,
+    })
+}
+
+fn rule_matches_context(rule: &EnrollmentRule, context: &EnrollmentRequestContext) -> Result<bool> {
+    if let Some(pattern) = &rule.match_subject_cn {
+        if !optional_regex_match(pattern, context.subject_cn.as_deref())? {
+            return Ok(false);
+        }
+    }
+    if let Some(pattern) = &rule.match_subject_ou {
+        if !optional_regex_match(pattern, context.subject_ou.as_deref())? {
+            return Ok(false);
+        }
+    }
+    if let Some(pattern) = &rule.match_subject_o {
+        if !optional_regex_match(pattern, context.subject_o.as_deref())? {
+            return Ok(false);
+        }
+    }
+    if let Some(pattern) = &rule.match_client_cert_issuer {
+        if !optional_regex_match(pattern, context.client_cert_issuer.as_deref())? {
+            return Ok(false);
+        }
+    }
+    if let Some(pattern) = &rule.match_san_dns {
+        if !vector_regex_match(pattern, &context.san_dns)? {
+            return Ok(false);
+        }
+    }
+    if let Some(pattern) = &rule.match_san_email {
+        if !vector_regex_match(pattern, &context.san_email)? {
+            return Ok(false);
+        }
+    }
+    if let Some(expected_key_type) = &rule.match_key_type {
+        if !expected_key_type.eq_ignore_ascii_case(&context.key_type) {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn optional_regex_match(pattern: &str, value: Option<&str>) -> Result<bool> {
+    let regex = Regex::new(pattern)
+        .with_context(|| format!("invalid enrollment authorization regex `{pattern}`"))?;
+    Ok(value.is_some_and(|candidate| regex.is_match(candidate)))
+}
+
+fn vector_regex_match(pattern: &str, values: &[String]) -> Result<bool> {
+    let regex = Regex::new(pattern)
+        .with_context(|| format!("invalid enrollment authorization regex `{pattern}`"))?;
+    Ok(values.iter().any(|value| regex.is_match(value)))
+}
+
+fn first_subject_entry(name: &X509NameRef, nid: Nid) -> Result<Option<String>> {
+    name.entries_by_nid(nid)
+        .next()
+        .map(|entry| {
+            entry
+                .data()
+                .as_utf8()
+                .map(|value| value.to_string())
+                .context("failed to decode X.509 name entry as UTF-8")
+        })
+        .transpose()
+}
+
+fn x509_name_to_string(name: &X509NameRef) -> Result<String> {
+    let mut parts = Vec::new();
+
+    for entry in name.entries() {
+        let short_name = entry.object().nid().short_name().unwrap_or("UNKNOWN");
+        let value = entry
+            .data()
+            .as_utf8()
+            .map(|value| value.to_string())
+            .context("failed to decode X.509 name entry as UTF-8")?;
+        parts.push(format!("{short_name}={value}"));
+    }
+
+    Ok(parts.join(","))
+}
+
+fn public_key_type_label<T>(public_key: &PKey<T>) -> String
+where
+    T: openssl::pkey::HasPublic,
+{
+    match public_key.id() {
+        PKeyId::RSA => "rsa".to_owned(),
+        PKeyId::EC => "ecdsa".to_owned(),
+        PKeyId::ED25519 => "ed25519".to_owned(),
+        PKeyId::ED448 => "ed448".to_owned(),
+        _ => format!("{:?}", public_key.id()).to_ascii_lowercase(),
+    }
+}
+
+fn pending_record_path(
+    pending_enrollment_dir: &Path,
+    operation: &str,
+    artifact_id: &str,
+) -> PathBuf {
+    pending_enrollment_dir
+        .join(operation)
+        .join(artifact_id)
+        .join("status.json")
+}
+
+fn persist_pending_enrollment(
+    openssl_binary: &str,
+    pending_enrollment_dir: &Path,
+    context: &EnrollmentRequestContext,
+    decision: &EnrollmentDecision,
+    retry_after_seconds: u32,
+    body: &[u8],
+) -> Result<()> {
+    let pending_dir = pending_enrollment_dir
+        .join(&context.operation)
+        .join(&context.artifact_id);
+
+    fs::create_dir_all(&pending_dir).with_context(|| {
+        format!(
+            "failed to create pending request dir `{}`",
+            pending_dir.display()
+        )
+    })?;
+
+    let csr_path = pending_dir.join("request.csr.der");
+    fs::write(&csr_path, body)
+        .with_context(|| format!("failed to write pending CSR `{}`", csr_path.display()))?;
+    validate_stored_csr(openssl_binary, &csr_path)?;
+
+    let record = PendingEnrollmentRecord {
+        operation: context.operation.clone(),
+        artifact_id: context.artifact_id.clone(),
+        retry_after_seconds,
+        state: PendingEnrollmentState::Pending,
+        matched_rule_name: decision.matched_rule_name.clone(),
+        action: decision.action.clone(),
+        reject_reason: decision.reject_reason.clone(),
+        context: context.clone(),
+    };
+
+    let record_path = pending_record_path(
+        pending_enrollment_dir,
+        &context.operation,
+        &context.artifact_id,
+    );
+    let record_json = serde_json::to_vec_pretty(&record)
+        .context("failed to serialize pending enrollment record")?;
+    fs::write(&record_path, record_json)
+        .with_context(|| format!("failed to write pending record `{}`", record_path.display()))?;
+
+    Ok(())
+}
+
+fn load_pending_enrollment(
+    pending_enrollment_dir: &Path,
+    operation: &str,
+    artifact_id: &str,
+) -> Result<Option<PendingEnrollmentRecord>> {
+    let record_path = pending_record_path(pending_enrollment_dir, operation, artifact_id);
+    if !record_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read(&record_path)
+        .with_context(|| format!("failed to read pending record `{}`", record_path.display()))?;
+    let record = serde_json::from_slice(&content)
+        .with_context(|| format!("failed to parse pending record `{}`", record_path.display()))?;
+    Ok(Some(record))
+}
+
+fn write_pending_enrollment(
+    pending_enrollment_dir: &Path,
+    record: &PendingEnrollmentRecord,
+) -> Result<()> {
+    let record_path = pending_record_path(
+        pending_enrollment_dir,
+        &record.operation,
+        &record.artifact_id,
+    );
+    let content = serde_json::to_vec_pretty(record)
+        .context("failed to serialize pending enrollment record")?;
+    fs::write(&record_path, content)
+        .with_context(|| format!("failed to write pending record `{}`", record_path.display()))?;
+    Ok(())
+}
+
+fn remove_pending_enrollment(
+    pending_enrollment_dir: &Path,
+    operation: &str,
+    artifact_id: &str,
+) -> Result<()> {
+    let pending_dir = pending_enrollment_dir.join(operation).join(artifact_id);
+    if pending_dir.exists() {
+        fs::remove_dir_all(&pending_dir).with_context(|| {
+            format!(
+                "failed to remove pending request `{}`",
+                pending_dir.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn list_pending_enrollments(
+    pending_enrollment_dir: &Path,
+) -> Result<Vec<PendingEnrollmentRecord>> {
+    let mut records = Vec::new();
+
+    if !pending_enrollment_dir.exists() {
+        return Ok(records);
+    }
+
+    for operation_entry in fs::read_dir(pending_enrollment_dir)
+        .with_context(|| format!("failed to read `{}`", pending_enrollment_dir.display()))?
+    {
+        let operation_entry = operation_entry?;
+        if !operation_entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        for artifact_entry in fs::read_dir(operation_entry.path())
+            .with_context(|| format!("failed to read `{}`", operation_entry.path().display()))?
+        {
+            let artifact_entry = artifact_entry?;
+            if !artifact_entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let record_path = artifact_entry.path().join("status.json");
+            if !record_path.exists() {
+                continue;
+            }
+
+            let content = fs::read(&record_path).with_context(|| {
+                format!("failed to read pending record `{}`", record_path.display())
+            })?;
+            let record: PendingEnrollmentRecord =
+                serde_json::from_slice(&content).with_context(|| {
+                    format!("failed to parse pending record `{}`", record_path.display())
+                })?;
+            records.push(record);
+        }
+    }
+
+    records.sort_by(|left, right| {
+        left.operation
+            .cmp(&right.operation)
+            .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+    });
+
+    Ok(records)
+}
+
+pub fn update_pending_enrollment_state(
+    pending_enrollment_dir: &Path,
+    operation: &str,
+    artifact_id: &str,
+    state: PendingEnrollmentState,
+    reject_reason: Option<String>,
+) -> Result<PendingEnrollmentRecord> {
+    let mut record = load_pending_enrollment(pending_enrollment_dir, operation, artifact_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!("pending enrollment `{operation}/{artifact_id}` was not found")
+        })?;
+
+    record.state = state;
+    record.reject_reason = reject_reason;
+    write_pending_enrollment(pending_enrollment_dir, &record)?;
+
+    Ok(record)
+}
+
+pub fn list_enrollment_artifacts(
+    enrollment_storage_dir: &Path,
+) -> Result<Vec<EnrollmentArtifactSummary>> {
+    let mut artifacts = Vec::new();
+
+    if !enrollment_storage_dir.exists() {
+        return Ok(artifacts);
+    }
+
+    for operation_entry in fs::read_dir(enrollment_storage_dir)
+        .with_context(|| format!("failed to read `{}`", enrollment_storage_dir.display()))?
+    {
+        let operation_entry = operation_entry?;
+        if !operation_entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let operation = operation_entry.file_name().to_string_lossy().into_owned();
+
+        for artifact_entry in fs::read_dir(operation_entry.path())
+            .with_context(|| format!("failed to read `{}`", operation_entry.path().display()))?
+        {
+            let artifact_entry = artifact_entry?;
+            if !artifact_entry.file_type()?.is_dir() {
+                continue;
+            }
+
+            let artifact_path = artifact_entry.path();
+            let artifact_id = artifact_entry.file_name().to_string_lossy().into_owned();
+            let csr_path = artifact_path.join("request.csr.der");
+            let certificate_path = artifact_path.join("issued-cert.pem");
+
+            artifacts.push(EnrollmentArtifactSummary {
+                operation: operation.clone(),
+                artifact_id,
+                csr_path: csr_path.to_string_lossy().into_owned(),
+                certificate_path: certificate_path
+                    .exists()
+                    .then(|| certificate_path.to_string_lossy().into_owned()),
+            });
+        }
+    }
+
+    artifacts.sort_by(|left, right| {
+        left.operation
+            .cmp(&right.operation)
+            .then_with(|| left.artifact_id.cmp(&right.artifact_id))
+    });
+
+    Ok(artifacts)
+}
+
 fn issue_certificate_from_request<T>(
     ca_certificate: &X509,
     ca_private_key: &PKey<Private>,
@@ -923,7 +1656,9 @@ where
     T: openssl::pkey::HasPublic,
 {
     let mut builder = X509::builder().context("failed to create X509 builder")?;
-    builder.set_version(2).context("failed to set X509 version")?;
+    builder
+        .set_version(2)
+        .context("failed to set X509 version")?;
 
     let serial_bn =
         BigNum::from_u32(next_serial_number()).context("failed to create serial number")?;
@@ -950,23 +1685,20 @@ where
         .set_not_after(&not_after)
         .context("failed to set notAfter")?;
 
-    let basic_constraints =
-        X509Extension::new_nid(None, None, Nid::BASIC_CONSTRAINTS, "CA:FALSE")
-            .context("failed to add basic constraints")?;
-    let key_usage = X509Extension::new_nid(
-        None,
-        None,
-        Nid::KEY_USAGE,
-        "digitalSignature,keyEncipherment",
-    )
-    .context("failed to add key usage")?;
-    let ext_key_usage = X509Extension::new_nid(
-        None,
-        None,
-        Nid::EXT_KEY_USAGE,
-        "clientAuth,serverAuth",
-    )
-    .context("failed to add extended key usage")?;
+    let basic_constraints = BasicConstraints::new()
+        .critical()
+        .build()
+        .context("failed to add basic constraints")?;
+    let key_usage = KeyUsage::new()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .context("failed to add key usage")?;
+    let ext_key_usage = ExtendedKeyUsage::new()
+        .client_auth()
+        .server_auth()
+        .build()
+        .context("failed to add extended key usage")?;
 
     builder
         .append_extension(basic_constraints)
@@ -1065,10 +1797,20 @@ fn generate_server_key(openssl_binary: &str, key_type: &str) -> Result<PathBuf> 
             command.args(["-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:4096"]);
         }
         "ecdsa-p256" => {
-            command.args(["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:prime256v1"]);
+            command.args([
+                "-algorithm",
+                "EC",
+                "-pkeyopt",
+                "ec_paramgen_curve:prime256v1",
+            ]);
         }
         "ecdsa-p384" => {
-            command.args(["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:secp384r1"]);
+            command.args([
+                "-algorithm",
+                "EC",
+                "-pkeyopt",
+                "ec_paramgen_curve:secp384r1",
+            ]);
         }
         "ml-dsa65" => {
             command.args(["-algorithm", "ML-DSA-65"]);
@@ -1112,66 +1854,40 @@ fn prefers_async_response(request: &Request<Incoming>) -> bool {
         .unwrap_or(false)
 }
 
-fn should_defer_enrollment(
-    openssl_binary: &str,
-    pending_enrollment_dir: &Path,
-    operation: &str,
-    body: &[u8],
-    prefer_async: bool,
-    retry_after_seconds: u32,
-) -> Result<bool> {
-    let pending_dir = pending_request_dir(pending_enrollment_dir, operation, body);
-
-    if pending_dir.exists() {
-        fs::remove_dir_all(&pending_dir)
-            .with_context(|| format!("failed to clear pending request `{}`", pending_dir.display()))?;
-        return Ok(false);
-    }
-
-    if !prefer_async {
-        return Ok(false);
-    }
-
-    fs::create_dir_all(&pending_dir)
-        .with_context(|| format!("failed to create pending request dir `{}`", pending_dir.display()))?;
-    let csr_path = pending_dir.join("request.csr.der");
-    fs::write(&csr_path, body)
-        .with_context(|| format!("failed to write pending CSR `{}`", csr_path.display()))?;
-    validate_stored_csr(openssl_binary, &csr_path)?;
-    fs::write(
-        pending_dir.join("status.txt"),
-        format!("operation={operation}\nretry_after={retry_after_seconds}\nstate=pending\n"),
-    )
-    .with_context(|| format!("failed to write pending status for `{}`", pending_dir.display()))?;
-
-    Ok(true)
-}
-
-fn pending_request_dir(pending_enrollment_dir: &Path, operation: &str, body: &[u8]) -> PathBuf {
-    pending_enrollment_dir.join(operation).join(sha256_hex(body))
-}
-
 fn persist_enrollment_artifacts(
     enrollment_storage_dir: &Path,
     operation: &str,
     csr_der: &[u8],
     issued_certificate_pem: &[u8],
 ) -> Result<(PathBuf, PathBuf)> {
-    let artifact_dir = enrollment_storage_dir.join(operation).join(sha256_hex(csr_der));
+    let artifact_dir = enrollment_storage_dir
+        .join(operation)
+        .join(sha256_hex(csr_der));
 
-    fs::create_dir_all(&artifact_dir)
-        .with_context(|| format!("failed to create enrollment dir `{}`", artifact_dir.display()))?;
+    fs::create_dir_all(&artifact_dir).with_context(|| {
+        format!(
+            "failed to create enrollment dir `{}`",
+            artifact_dir.display()
+        )
+    })?;
 
     let csr_path = artifact_dir.join("request.csr.der");
     let cert_path = artifact_dir.join("issued-cert.pem");
 
     fs::write(&csr_path, csr_der)
         .with_context(|| format!("failed to write stored CSR `{}`", csr_path.display()))?;
-    fs::write(&cert_path, issued_certificate_pem)
-        .with_context(|| format!("failed to write stored certificate `{}`", cert_path.display()))?;
+    fs::write(&cert_path, issued_certificate_pem).with_context(|| {
+        format!(
+            "failed to write stored certificate `{}`",
+            cert_path.display()
+        )
+    })?;
     fs::write(
         artifact_dir.join("metadata.txt"),
-        format!("operation={operation}\nartifact_id={}\n", sha256_hex(csr_der)),
+        format!(
+            "operation={operation}\nartifact_id={}\n",
+            sha256_hex(csr_der)
+        ),
     )
     .with_context(|| format!("failed to write metadata for `{}`", artifact_dir.display()))?;
 
@@ -1209,7 +1925,8 @@ fn validate_persisted_artifacts_for_private_key(
     validate_stored_csr(openssl_binary, csr_path)?;
     validate_stored_certificate(openssl_binary, cert_path, ca_certificate_path)?;
     let cert_public_key = extract_public_key_from_certificate(openssl_binary, cert_path)?;
-    let private_key_public_key = extract_public_key_from_private_key(openssl_binary, private_key_path)?;
+    let private_key_public_key =
+        extract_public_key_from_private_key(openssl_binary, private_key_path)?;
     if cert_public_key != private_key_public_key {
         bail!(
             "issued certificate `{}` does not match generated private key `{}`",
@@ -1255,7 +1972,12 @@ fn validate_stored_certificate(
             "-issuer",
         ],
     )
-    .with_context(|| format!("failed to inspect stored certificate `{}`", cert_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to inspect stored certificate `{}`",
+            cert_path.display()
+        )
+    })?;
 
     run_command(
         openssl_binary,
@@ -1266,7 +1988,12 @@ fn validate_stored_certificate(
             cert_path.to_string_lossy().as_ref(),
         ],
     )
-    .with_context(|| format!("failed to verify stored certificate `{}`", cert_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to verify stored certificate `{}`",
+            cert_path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -1284,7 +2011,12 @@ fn extract_public_key_from_csr(openssl_binary: &str, csr_path: &Path) -> Result<
             "-noout",
         ],
     )
-    .with_context(|| format!("failed to extract public key from CSR `{}`", csr_path.display()))
+    .with_context(|| {
+        format!(
+            "failed to extract public key from CSR `{}`",
+            csr_path.display()
+        )
+    })
 }
 
 fn extract_public_key_from_certificate(openssl_binary: &str, cert_path: &Path) -> Result<String> {
@@ -1318,7 +2050,12 @@ fn extract_public_key_from_private_key(openssl_binary: &str, key_path: &Path) ->
             "PEM",
         ],
     )
-    .with_context(|| format!("failed to extract public key from private key `{}`", key_path.display()))
+    .with_context(|| {
+        format!(
+            "failed to extract public key from private key `{}`",
+            key_path.display()
+        )
+    })
 }
 
 fn extract_subject_alt_names_from_csr(
@@ -1346,8 +2083,11 @@ fn extract_subject_alt_names_from_certificate(
     openssl_binary: &str,
     certificate: &X509,
 ) -> Result<BTreeSet<String>> {
-    let certificate_path =
-        write_temp_file("est-reenroll-peer-certificate", "pem", &certificate.to_pem()?)?;
+    let certificate_path = write_temp_file(
+        "est-reenroll-peer-certificate",
+        "pem",
+        &certificate.to_pem()?,
+    )?;
     let output = run_command(
         openssl_binary,
         &[
@@ -1358,7 +2098,12 @@ fn extract_subject_alt_names_from_certificate(
             "-text",
         ],
     )
-    .with_context(|| format!("failed to inspect certificate `{}`", certificate_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to inspect certificate `{}`",
+            certificate_path.display()
+        )
+    })?;
     cleanup_temp_file(&certificate_path);
 
     Ok(parse_subject_alt_names_from_text(&output))

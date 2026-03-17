@@ -1,7 +1,7 @@
 # Progress Log
 
 ## Status
-Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, and RPM packaging completed for the current development phase.
+Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, RPM packaging, and the WebUI/manual-approval administration phase completed for the current development phase.
 
 ## Completed Work
 - Initialized Rust binary crate `est-server`
@@ -56,6 +56,14 @@ Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, and RPM packagin
 - Ran the EST server persistently on Linux host `192.168.200.120` under `tmux`
 - Produced local EST validation evidence files under `logs/`
 - Pulled the built RPM artifact back to the local workspace as `est-server-0.1.0-1.x86_64.rpm`
+- Added embedded WebUI backend support in `src/webui/mod.rs`
+- Added embedded WebUI frontend assets under `webui/static/`
+- Added runtime WebUI configuration for listener, TLS files, auth mode, admin credentials, and managed `systemd` unit name
+- Added EST enrollment policy configuration with default action and rule-based matching
+- Added persisted manual approval records in `logs/pending/<operation>/<artifact_id>/status.json`
+- Added WebUI APIs for status, config, rules, pending enrollments, issued enrollment history, and approve/reject operations
+- Added WebUI-backed approval flow for `simpleenroll`, `simplereenroll`, and `serverkeygen`
+- Updated `README.md` to document WebUI operation, enrollment rules, and manual approval workflow
 
 ## Validation Results
 Validated successfully with:
@@ -68,8 +76,15 @@ Validated successfully with:
 - Linux-host `cargo generate-rpm`
 - local `./target/release/est-server --config ./config.toml.example`
 - local `./target/release/est-server --config ./config.toml --listen-address 127.0.0.1`
+- local `cargo check`
+- local `cargo test`
+- local `cargo fmt --all --check`
+- local `cargo clippy --all-targets -- -D warnings`
 - Linux-host staged `/opt/est-server` deployment using `config.toml.example`
 - Linux-host `systemd-analyze verify /tmp/est-server.service`
+- Linux-host `cargo check`
+- Linux-host `cargo test`
+- Linux-host `cargo clippy --all-targets -- -D warnings`
 
 Local macOS validation used:
 - `OPENSSL_DIR=/opt/homebrew/opt/openssl@3.5`
@@ -113,4 +128,4 @@ ml_dsa_supported = false
 - Upgrade the Linux host OpenSSL if PQ server-generated key algorithms such as ML-DSA must be validated there
 
 ## Next Step
-Proceed with any future release tagging, GitHub Releases publication, and follow-on development from the public repository `https://github.com/krich11/est-pqc-server`.
+Push the `webui` branch to GitHub, then proceed with any future release tagging, GitHub Releases publication, and follow-on development from the public repository `https://github.com/krich11/est-pqc-server`.

@@ -1,12 +1,15 @@
 mod est;
+mod webui;
 
 use anyhow::{anyhow, bail, Context, Result};
+use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
 use clap::Parser;
 use crossterm::{
     event, execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use openssl::rand::rand_bytes;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -96,7 +99,10 @@ struct Cli {
     #[arg(long, help = "Override pending-enrollment storage directory")]
     pending_enrollment_dir: Option<String>,
 
-    #[arg(long, help = "Override maximum accepted HTTP request body size in bytes")]
+    #[arg(
+        long,
+        help = "Override maximum accepted HTTP request body size in bytes"
+    )]
     max_request_body_bytes: Option<usize>,
 
     #[arg(long, help = "Override default Retry-After value in seconds")]
@@ -107,6 +113,33 @@ struct Cli {
 
     #[arg(long, help = "Override detected ML-DSA support with true or false")]
     ml_dsa_supported: Option<bool>,
+
+    #[arg(long, help = "Enable or disable the WebUI")]
+    webui_enabled: Option<bool>,
+
+    #[arg(long, help = "Override WebUI bind address")]
+    webui_listen_address: Option<String>,
+
+    #[arg(long, help = "Override WebUI bind port")]
+    webui_listen_port: Option<u16>,
+
+    #[arg(long, help = "Override WebUI TLS certificate path")]
+    webui_tls_certificate_path: Option<String>,
+
+    #[arg(long, help = "Override WebUI TLS private key path")]
+    webui_tls_private_key_path: Option<String>,
+
+    #[arg(long, help = "Override WebUI auth mode: basic or mtls")]
+    webui_auth_mode: Option<String>,
+
+    #[arg(long, help = "Override WebUI admin username")]
+    webui_admin_username: Option<String>,
+
+    #[arg(long, help = "Override WebUI admin password hash")]
+    webui_admin_password_hash: Option<String>,
+
+    #[arg(long, help = "Override systemd unit name managed by the WebUI")]
+    webui_systemd_unit_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +245,19 @@ async fn main() -> Result<()> {
     if !cli.config_mode {
         ensure_runtime_directories().context("failed to prepare runtime directories")?;
         init_logging().context("failed to initialize logging")?;
+
+        let runtime_config = load_runtime_config(&cli.config, &cli.server_overrides())
+            .context("failed to prepare runtime configuration")?;
+
+        if runtime_config.webui.enabled {
+            let webui_config = runtime_config.clone();
+            tokio::spawn(async move {
+                if let Err(error) = webui::run_webui(webui_config).await {
+                    tracing::error!("WebUI listener failed: {error:#}");
+                }
+            });
+        }
+
         return est::run_server_with_overrides(&cli.config, &cli.server_overrides()).await;
     }
 
@@ -288,6 +334,18 @@ impl Cli {
             default_retry_after_seconds: self.default_retry_after_seconds,
             ml_kem_supported: self.ml_kem_supported,
             ml_dsa_supported: self.ml_dsa_supported,
+            webui_enabled: self.webui_enabled,
+            webui_listen_address: self.webui_listen_address.clone(),
+            webui_listen_port: self.webui_listen_port,
+            webui_tls_certificate_path: self.webui_tls_certificate_path.clone(),
+            webui_tls_private_key_path: self.webui_tls_private_key_path.clone(),
+            webui_auth_mode: self
+                .webui_auth_mode
+                .as_deref()
+                .and_then(parse_webui_auth_mode),
+            webui_admin_username: self.webui_admin_username.clone(),
+            webui_admin_password_hash: self.webui_admin_password_hash.clone(),
+            webui_systemd_unit_name: self.webui_systemd_unit_name.clone(),
         }
     }
 }
@@ -341,7 +399,8 @@ fn detect_environment() -> Result<EnvironmentReport> {
         bail!("OpenSSL 3.x is required from the CLI, detected `{cli_openssl_version}`");
     }
 
-    let providers_output = run_command(&openssl_binary, &["list", "-providers"]).unwrap_or_default();
+    let providers_output =
+        run_command(&openssl_binary, &["list", "-providers"]).unwrap_or_default();
     let kem_output = run_command(&openssl_binary, &["list", "-kem-algorithms"]).unwrap_or_default();
     let signature_output =
         run_command(&openssl_binary, &["list", "-signature-algorithms"]).unwrap_or_default();
@@ -453,7 +512,10 @@ fn detect_environment() -> Result<EnvironmentReport> {
         );
     }
 
-    if !library_paths_present.iter().any(|path| path.contains("libssl")) {
+    if !library_paths_present
+        .iter()
+        .any(|path| path.contains("libssl"))
+    {
         push_unique(
             &mut issues,
             "system libssl library path was not detected under the configured OpenSSL directory"
@@ -723,6 +785,79 @@ fn prompt_for_configuration(report: &EnvironmentReport) -> Result<est::ServerCon
         .interact_text()
         .context("failed to read Retry-After value")?;
 
+    let enable_webui = Confirm::with_theme(&theme)
+        .with_prompt("Enable WebUI")
+        .default(false)
+        .interact()
+        .context("failed to read WebUI enablement")?;
+
+    let webui_listen_address = if enable_webui {
+        Input::with_theme(&theme)
+            .with_prompt("Enter WebUI listening address")
+            .default("127.0.0.1".to_owned())
+            .interact_text()
+            .context("failed to read WebUI listening address")?
+    } else {
+        "127.0.0.1".to_owned()
+    };
+
+    let webui_listen_port = if enable_webui {
+        Input::with_theme(&theme)
+            .with_prompt("Enter WebUI listening port")
+            .default(9443_u16)
+            .interact_text()
+            .context("failed to read WebUI listening port")?
+    } else {
+        9443
+    };
+
+    let webui_auth_mode = if enable_webui {
+        let auth_mode_index = Select::with_theme(&theme)
+            .with_prompt("Select WebUI authentication mode")
+            .items(&["Basic", "mTLS"])
+            .default(0)
+            .interact()
+            .context("failed to select WebUI auth mode")?;
+        if auth_mode_index == 0 {
+            est::WebUiAuthMode::Basic
+        } else {
+            est::WebUiAuthMode::Mtls
+        }
+    } else {
+        est::WebUiAuthMode::Basic
+    };
+
+    let webui_admin_username = if enable_webui {
+        Input::with_theme(&theme)
+            .with_prompt("Enter WebUI admin username")
+            .default("admin".to_owned())
+            .interact_text()
+            .context("failed to read WebUI admin username")?
+    } else {
+        "admin".to_owned()
+    };
+
+    let webui_admin_password_hash =
+        if enable_webui && matches!(webui_auth_mode, est::WebUiAuthMode::Basic) {
+            let password = Input::<String>::with_theme(&theme)
+                .with_prompt("Enter WebUI admin password")
+                .interact_text()
+                .context("failed to read WebUI admin password")?;
+            hash_webui_password(&password)?
+        } else {
+            String::new()
+        };
+
+    let webui_systemd_unit_name = if enable_webui {
+        Input::with_theme(&theme)
+            .with_prompt("Enter systemd unit name managed by the WebUI")
+            .default("est-server".to_owned())
+            .interact_text()
+            .context("failed to read systemd unit name")?
+    } else {
+        "est-server".to_owned()
+    };
+
     let enable_fips = if report.fips_available {
         Confirm::with_theme(&theme)
             .with_prompt("Enable FIPS mode")
@@ -745,14 +880,26 @@ fn prompt_for_configuration(report: &EnvironmentReport) -> Result<est::ServerCon
         ca_certificate_path,
         ca_private_key_path,
         client_auth_ca_certificate_path,
-        tls_certificate_path,
-        tls_private_key_path,
+        tls_certificate_path: tls_certificate_path.clone(),
+        tls_private_key_path: tls_private_key_path.clone(),
         enrollment_storage_dir,
         pending_enrollment_dir,
         max_request_body_bytes,
         default_retry_after_seconds,
         ml_kem_supported: report.ml_kem_supported,
         ml_dsa_supported: report.ml_dsa_supported,
+        webui: est::WebUiConfig {
+            enabled: enable_webui,
+            listen_address: webui_listen_address,
+            listen_port: webui_listen_port,
+            tls_certificate_path: tls_certificate_path.clone(),
+            tls_private_key_path: tls_private_key_path.clone(),
+            auth_mode: webui_auth_mode,
+            admin_username: webui_admin_username,
+            admin_password_hash: webui_admin_password_hash,
+            systemd_unit_name: webui_systemd_unit_name,
+        },
+        enrollment: est::EnrollmentConfig::default(),
     })
 }
 
@@ -777,6 +924,8 @@ fn default_configuration(report: &EnvironmentReport) -> est::ServerConfig {
         default_retry_after_seconds: 60,
         ml_kem_supported: report.ml_kem_supported,
         ml_dsa_supported: report.ml_dsa_supported,
+        webui: est::WebUiConfig::default(),
+        enrollment: est::EnrollmentConfig::default(),
     }
 }
 
@@ -841,6 +990,85 @@ fn apply_cli_overrides_to_config(
     if let Some(value) = overrides.ml_dsa_supported {
         config.ml_dsa_supported = value;
     }
+    if let Some(value) = overrides.webui_enabled {
+        config.webui.enabled = value;
+    }
+    if let Some(value) = &overrides.webui_listen_address {
+        config.webui.listen_address.clone_from(value);
+    }
+    if let Some(value) = overrides.webui_listen_port {
+        config.webui.listen_port = value;
+    }
+    if let Some(value) = &overrides.webui_tls_certificate_path {
+        config.webui.tls_certificate_path.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_tls_private_key_path {
+        config.webui.tls_private_key_path.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_auth_mode {
+        config.webui.auth_mode = value.clone();
+    }
+    if let Some(value) = &overrides.webui_admin_username {
+        config.webui.admin_username.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_admin_password_hash {
+        config.webui.admin_password_hash.clone_from(value);
+    }
+    if let Some(value) = &overrides.webui_systemd_unit_name {
+        config.webui.systemd_unit_name.clone_from(value);
+    }
+}
+
+fn parse_webui_auth_mode(value: &str) -> Option<est::WebUiAuthMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "basic" => Some(est::WebUiAuthMode::Basic),
+        "mtls" => Some(est::WebUiAuthMode::Mtls),
+        _ => None,
+    }
+}
+
+fn hash_webui_password(password: &str) -> Result<String> {
+    let mut salt_bytes = [0_u8; 16];
+    rand_bytes(&mut salt_bytes).context("failed to generate WebUI password salt")?;
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|error| anyhow!("failed to encode WebUI password salt: {error}"))?;
+    let hash = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|error| anyhow!("failed to hash WebUI admin password: {error}"))?;
+    Ok(hash.to_string())
+}
+
+fn load_runtime_config(
+    path: &Path,
+    overrides: &est::ServerConfigOverrides,
+) -> Result<est::ServerConfig> {
+    let mut config = if path.exists() {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        toml::from_str(&content).with_context(|| format!("failed to parse `{}`", path.display()))?
+    } else {
+        est::ServerConfig::default()
+    };
+
+    apply_cli_overrides_to_config(&mut config, overrides);
+
+    if config.webui.listen_address.trim().is_empty() {
+        config.webui.listen_address = "127.0.0.1".to_owned();
+    }
+    if config.webui.tls_certificate_path.trim().is_empty() {
+        config.webui.tls_certificate_path = config.tls_certificate_path.clone();
+    }
+    if config.webui.tls_private_key_path.trim().is_empty() {
+        config.webui.tls_private_key_path = config.tls_private_key_path.clone();
+    }
+    if config.webui.admin_username.trim().is_empty() {
+        config.webui.admin_username = "admin".to_owned();
+    }
+    if config.webui.systemd_unit_name.trim().is_empty() {
+        config.webui.systemd_unit_name = "est-server".to_owned();
+    }
+
+    Ok(config)
 }
 
 fn key_type_to_config_value(key_type: KeyType) -> String {

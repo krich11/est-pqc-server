@@ -113,12 +113,7 @@ fn main() -> Result<()> {
     generated_files.push(leaf_ext_path.clone());
 
     for profile in profiles {
-        generate_identity(
-            &openssl_binary,
-            &demo_dir,
-            &leaf_ext_path,
-            profile,
-        )?;
+        generate_identity(&openssl_binary, &demo_dir, &leaf_ext_path, profile)?;
         generated_files.push(demo_dir.join(format!(
             "{}-{}.key",
             profile.slug,
@@ -328,7 +323,11 @@ fn generate_identity(
     let ca_serial_path = demo_dir.join("demo-ca.srl");
 
     generate_private_key(openssl_binary, profile.key_kind, &key_path)?;
-    validate_private_key(openssl_binary, &key_path, &format!("{basename} private key"))?;
+    validate_private_key(
+        openssl_binary,
+        &key_path,
+        &format!("{basename} private key"),
+    )?;
 
     run_command(
         openssl_binary,

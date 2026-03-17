@@ -29,7 +29,10 @@ struct Cli {
     #[arg(long, help = "Override EST base URL, e.g. https://127.0.0.1:8443")]
     base_url: Option<String>,
 
-    #[arg(long, help = "Optional SSH target for remote artifact validation, e.g. krich@192.168.200.120")]
+    #[arg(
+        long,
+        help = "Optional SSH target for remote artifact validation, e.g. krich@192.168.200.120"
+    )]
     ssh_host: Option<String>,
 
     #[arg(
@@ -74,6 +77,13 @@ struct HttpCapture {
 struct MultipartPart {
     headers: String,
     body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AsyncValidationSpec {
+    operation: &'static str,
+    csr_pem_path: &'static str,
+    client_auth: Option<(&'static str, &'static str)>,
 }
 
 fn main() -> Result<()> {
@@ -288,7 +298,9 @@ fn validate_config(config: &BootstrapConfig, report_lines: &mut Vec<String>) -> 
         }
     }
 
-    let port = config.listen_port.context("missing `listen_port` in config")?;
+    let port = config
+        .listen_port
+        .context("missing `listen_port` in config")?;
     report_lines.push(format!("- Configured listen port: {port}"));
 
     let cipher = config
@@ -330,7 +342,10 @@ fn validate_demo_artifacts(openssl_binary: &str, report_lines: &mut Vec<String>)
     for file in required_files {
         let path = demo_dir.join(file);
         if !path.exists() {
-            bail!("required demo artifact missing: `{}`", path.to_string_lossy());
+            bail!(
+                "required demo artifact missing: `{}`",
+                path.to_string_lossy()
+            );
         }
     }
 
@@ -372,7 +387,15 @@ fn validate_tls13_only(
         openssl_binary,
         &target.host,
         &target.port,
-        &["s_client", "-connect", &format!("{}:{}", target.host, target.port), "-tls1_3", "-brief", "-CAfile", "demo/demo-ca.crt"],
+        &[
+            "s_client",
+            "-connect",
+            &format!("{}:{}", target.host, target.port),
+            "-tls1_3",
+            "-brief",
+            "-CAfile",
+            "demo/demo-ca.crt",
+        ],
         "TLS 1.3 success probe",
     )?;
 
@@ -413,11 +436,7 @@ fn validate_cacerts(
     ensure_status(&capture, 200, "cacerts request")?;
     ensure_header_contains(&capture.headers, "content-type:", "application/pkcs7-mime")?;
     ensure_header_contains(&capture.headers, "content-type:", "smime-type=certs-only")?;
-    ensure_header_contains(
-        &capture.headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&capture.headers, "content-transfer-encoding:", "binary")?;
 
     run_command(
         openssl_binary,
@@ -454,11 +473,7 @@ fn validate_csrattrs(target: &ValidationTarget, report_lines: &mut Vec<String>) 
     )?;
     ensure_status(&capture, 200, "csrattrs request")?;
     ensure_header_contains(&capture.headers, "content-type:", "application/csrattrs")?;
-    ensure_header_contains(
-        &capture.headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&capture.headers, "content-transfer-encoding:", "binary")?;
 
     if capture.body != [0x30, 0x00] {
         bail!("csrattrs response was not the expected empty ASN.1 sequence");
@@ -492,11 +507,7 @@ fn validate_simple_enroll(
     ensure_status(&capture, 200, "simpleenroll request")?;
     ensure_header_contains(&capture.headers, "content-type:", "application/pkcs7-mime")?;
     ensure_header_contains(&capture.headers, "content-type:", "smime-type=certs-only")?;
-    ensure_header_contains(
-        &capture.headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&capture.headers, "content-transfer-encoding:", "binary")?;
 
     let certs_pem_path = validate_pkcs7_cert_response(openssl_binary, &capture.body_path)?;
     verify_first_certificate_against_ca(openssl_binary, &certs_pem_path, "demo/demo-ca.crt")?;
@@ -548,11 +559,7 @@ fn validate_simple_reenroll(
     ensure_status(&capture, 200, "simplereenroll request")?;
     ensure_header_contains(&capture.headers, "content-type:", "application/pkcs7-mime")?;
     ensure_header_contains(&capture.headers, "content-type:", "smime-type=certs-only")?;
-    ensure_header_contains(
-        &capture.headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&capture.headers, "content-transfer-encoding:", "binary")?;
 
     let certs_pem_path = validate_pkcs7_cert_response(openssl_binary, &capture.body_path)?;
     verify_first_certificate_against_ca(openssl_binary, &certs_pem_path, "demo/demo-ca.crt")?;
@@ -603,11 +610,7 @@ fn validate_server_keygen(
     )?;
     ensure_status(&capture, 200, "serverkeygen request")?;
     ensure_header_contains(&capture.headers, "content-type:", "multipart/mixed")?;
-    ensure_header_contains(
-        &capture.headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&capture.headers, "content-transfer-encoding:", "binary")?;
     let boundary = parse_boundary(&capture.headers)?;
     let parts = parse_multipart_body(&capture.body, &boundary)?;
     if parts.len() != 2 {
@@ -619,24 +622,15 @@ fn validate_server_keygen(
 
     ensure_header_contains(&parts[0].headers, "content-type:", "application/pkcs7-mime")?;
     ensure_header_contains(&parts[0].headers, "content-type:", "smime-type=certs-only")?;
-    ensure_header_contains(
-        &parts[0].headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&parts[0].headers, "content-transfer-encoding:", "binary")?;
     ensure_header_contains(&parts[1].headers, "content-type:", "application/pkcs7-mime")?;
-    ensure_header_contains(
-        &parts[1].headers,
-        "content-transfer-encoding:",
-        "binary",
-    )?;
+    ensure_header_contains(&parts[1].headers, "content-transfer-encoding:", "binary")?;
 
     let pkcs7_path = write_temp_file("est-serverkeygen-cert-part", "der", &parts[0].body)?;
     let certs_pem_path = validate_pkcs7_cert_response(openssl_binary, &pkcs7_path)?;
     verify_first_certificate_against_ca(openssl_binary, &certs_pem_path, "demo/demo-ca.crt")?;
 
-    let encrypted_key_path =
-        write_temp_file("est-serverkeygen-key-part", "der", &parts[1].body)?;
+    let encrypted_key_path = write_temp_file("est-serverkeygen-key-part", "der", &parts[1].body)?;
     let decrypted_key_path = temp_path("est-serverkeygen-decrypted-key", "pem");
     run_command(
         openssl_binary,
@@ -710,9 +704,11 @@ fn validate_simple_enroll_async(
         target,
         ssh_host,
         remote_project_path,
-        SIMPLE_ENROLL_OPERATION,
-        "demo/ecdsa-p256-client.csr",
-        Some(("demo/rsa-2048-client.crt", "demo/rsa-2048-client.key")),
+        &AsyncValidationSpec {
+            operation: SIMPLE_ENROLL_OPERATION,
+            csr_pem_path: "demo/ecdsa-p256-client.csr",
+            client_auth: Some(("demo/rsa-2048-client.crt", "demo/rsa-2048-client.key")),
+        },
         report_lines,
     )
 }
@@ -729,9 +725,11 @@ fn validate_simple_reenroll_async(
         target,
         ssh_host,
         remote_project_path,
-        SIMPLE_REENROLL_OPERATION,
-        "demo/rsa-2048-client.csr",
-        Some(("demo/rsa-2048-client.crt", "demo/rsa-2048-client.key")),
+        &AsyncValidationSpec {
+            operation: SIMPLE_REENROLL_OPERATION,
+            csr_pem_path: "demo/rsa-2048-client.csr",
+            client_auth: Some(("demo/rsa-2048-client.crt", "demo/rsa-2048-client.key")),
+        },
         report_lines,
     )
 }
@@ -748,9 +746,11 @@ fn validate_server_keygen_async(
         target,
         ssh_host,
         remote_project_path,
-        SERVER_KEYGEN_OPERATION,
-        "demo/rsa-2048-client.csr",
-        Some(("demo/rsa-2048-client.crt", "demo/rsa-2048-client.key")),
+        &AsyncValidationSpec {
+            operation: SERVER_KEYGEN_OPERATION,
+            csr_pem_path: "demo/rsa-2048-client.csr",
+            client_auth: Some(("demo/rsa-2048-client.crt", "demo/rsa-2048-client.key")),
+        },
         report_lines,
     )
 }
@@ -760,35 +760,36 @@ fn validate_async_enrollment_round_trip(
     target: &ValidationTarget,
     ssh_host: Option<&str>,
     remote_project_path: &str,
-    operation: &str,
-    csr_pem_path: &str,
-    client_auth: Option<(&str, &str)>,
+    spec: &AsyncValidationSpec,
     report_lines: &mut Vec<String>,
 ) -> Result<()> {
-    let csr_der_path = convert_csr_to_der(openssl_binary, csr_pem_path)?;
+    let csr_der_path = convert_csr_to_der(openssl_binary, spec.csr_pem_path)?;
     let csr_der = fs::read(&csr_der_path)
         .with_context(|| format!("failed to read `{}`", csr_der_path.display()))?;
 
     let first = enrollment_request(
         target,
-        operation,
+        spec.operation,
         &csr_der_path,
-        client_auth,
+        spec.client_auth,
         &["--header".to_owned(), "Prefer: respond-async".to_owned()],
-        &format!("{operation} deferred request"),
+        &format!("{} deferred request", spec.operation),
     )?;
-    ensure_status(&first, 202, &format!("{operation} deferred request"))?;
+    ensure_status(&first, 202, &format!("{} deferred request", spec.operation))?;
     ensure_header_contains(&first.headers, "retry-after:", "60")?;
     ensure_header_contains(&first.headers, "content-type:", "text/plain")?;
     if first.body.is_empty() {
-        bail!("`{operation}` deferred response body was unexpectedly empty");
+        bail!(
+            "`{}` deferred response body was unexpectedly empty",
+            spec.operation
+        );
     }
 
     if let Some(ssh_host) = ssh_host {
         validate_remote_pending_artifacts(
             ssh_host,
             remote_project_path,
-            operation,
+            spec.operation,
             &csr_der,
             true,
         )?;
@@ -796,19 +797,19 @@ fn validate_async_enrollment_round_trip(
 
     let second = enrollment_request(
         target,
-        operation,
+        spec.operation,
         &csr_der_path,
-        client_auth,
+        spec.client_auth,
         &["--header".to_owned(), "Prefer: respond-async".to_owned()],
-        &format!("{operation} follow-up request"),
+        &format!("{} follow-up request", spec.operation),
     )?;
-    ensure_status(&second, 200, &format!("{operation} follow-up request"))?;
+    ensure_status(&second, 200, &format!("{} follow-up request", spec.operation))?;
 
     if let Some(ssh_host) = ssh_host {
         validate_remote_pending_artifacts(
             ssh_host,
             remote_project_path,
-            operation,
+            spec.operation,
             &csr_der,
             false,
         )?;
@@ -819,13 +820,17 @@ fn validate_async_enrollment_round_trip(
     cleanup_temp_file(&csr_der_path);
 
     report_lines.push(format!(
-        "- `{operation}` supports RFC 7030 deferred processing with `202 Accepted`, `Retry-After`, and successful completion on retry"
+        "- `{}` supports RFC 7030 deferred processing with `202 Accepted`, `Retry-After`, and successful completion on retry",
+        spec.operation
     ));
 
     Ok(())
 }
 
-fn validate_unknown_endpoint(target: &ValidationTarget, report_lines: &mut Vec<String>) -> Result<()> {
+fn validate_unknown_endpoint(
+    target: &ValidationTarget,
+    report_lines: &mut Vec<String>,
+) -> Result<()> {
     let capture = http_request(
         target,
         &[
@@ -839,7 +844,8 @@ fn validate_unknown_endpoint(target: &ValidationTarget, report_lines: &mut Vec<S
     ensure_header_contains(&capture.headers, "content-type:", "text/plain")?;
     cleanup_capture(&capture);
 
-    report_lines.push("- Unknown EST endpoint returns `404 Not Found` with plaintext body".to_owned());
+    report_lines
+        .push("- Unknown EST endpoint returns `404 Not Found` with plaintext body".to_owned());
 
     Ok(())
 }
@@ -869,7 +875,10 @@ fn validate_simple_enroll_wrong_content_type(
     ensure_status(&capture, 415, "simpleenroll wrong content-type request")?;
     cleanup_capture(&capture);
 
-    report_lines.push("- `simpleenroll` rejects invalid `Content-Type` with `415 Unsupported Media Type`".to_owned());
+    report_lines.push(
+        "- `simpleenroll` rejects invalid `Content-Type` with `415 Unsupported Media Type`"
+            .to_owned(),
+    );
 
     Ok(())
 }
@@ -899,7 +908,8 @@ fn validate_simple_enroll_empty_body(
     ensure_status(&capture, 400, "simpleenroll empty-body request")?;
     cleanup_capture(&capture);
 
-    report_lines.push("- `simpleenroll` rejects an empty PKCS#10 body with `400 Bad Request`".to_owned());
+    report_lines
+        .push("- `simpleenroll` rejects an empty PKCS#10 body with `400 Bad Request`".to_owned());
 
     Ok(())
 }
@@ -992,7 +1002,11 @@ fn enrollment_request(
     http_request(target, &args, label)
 }
 
-fn http_request(target: &ValidationTarget, request_args: &[String], label: &str) -> Result<HttpCapture> {
+fn http_request(
+    target: &ValidationTarget,
+    request_args: &[String],
+    label: &str,
+) -> Result<HttpCapture> {
     let body_path = temp_path(label.replace(' ', "-").as_str(), "body");
     let headers_path = temp_path(label.replace(' ', "-").as_str(), "headers");
 
@@ -1025,10 +1039,12 @@ fn http_request(target: &ValidationTarget, request_args: &[String], label: &str)
 
     let status_text = String::from_utf8(output.stdout)
         .with_context(|| format!("curl status output was not valid UTF-8 for {label}"))?;
-    let status = status_text
-        .trim()
-        .parse::<u16>()
-        .with_context(|| format!("failed to parse HTTP status `{}` for {label}", status_text.trim()))?;
+    let status = status_text.trim().parse::<u16>().with_context(|| {
+        format!(
+            "failed to parse HTTP status `{}` for {label}",
+            status_text.trim()
+        )
+    })?;
     let headers = fs::read_to_string(&headers_path)
         .with_context(|| format!("failed to read `{}`", headers_path.display()))?;
     let body = fs::read(&body_path)
@@ -1078,11 +1094,7 @@ fn openssl_transport_success(
     Ok(())
 }
 
-fn openssl_transport_failure(
-    openssl_binary: &str,
-    args: &[&str],
-    label: &str,
-) -> Result<()> {
+fn openssl_transport_failure(openssl_binary: &str, args: &[&str], label: &str) -> Result<()> {
     let output = Command::new(openssl_binary)
         .args(args)
         .output()
@@ -1126,7 +1138,12 @@ fn validate_pkcs7_cert_response(openssl_binary: &str, pkcs7_path: &Path) -> Resu
             "-print_certs",
         ],
     )
-    .with_context(|| format!("failed to extract certificates from `{}`", pkcs7_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to extract certificates from `{}`",
+            pkcs7_path.display()
+        )
+    })?;
 
     let output_path = temp_path("est-pkcs7-certs", "pem");
     fs::write(&output_path, output)
@@ -1286,9 +1303,7 @@ fn validate_remote_pending_artifacts(
             "set -euo pipefail; cd {remote_project_path:?}; test -f '{pending_dir}/request.csr.der'; test -f '{pending_dir}/status.txt'"
         )
     } else {
-        format!(
-            "set -euo pipefail; cd {remote_project_path:?}; test ! -e '{pending_dir}'"
-        )
+        format!("set -euo pipefail; cd {remote_project_path:?}; test ! -e '{pending_dir}'")
     };
 
     run_ssh_command(ssh_host, &remote_command).with_context(|| {
@@ -1428,7 +1443,11 @@ fn ensure_status(capture: &HttpCapture, expected: u16, label: &str) -> Result<()
     Ok(())
 }
 
-fn ensure_header_contains(headers: &str, header_prefix: &str, expected_fragment: &str) -> Result<()> {
+fn ensure_header_contains(
+    headers: &str,
+    header_prefix: &str,
+    expected_fragment: &str,
+) -> Result<()> {
     let prefix = header_prefix.to_ascii_lowercase();
     let expected = expected_fragment.to_ascii_lowercase();
 

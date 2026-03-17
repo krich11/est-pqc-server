@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EST PQC Server WebUI</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">EST</div>
+        <div>
+          <h1>EST PQC Server</h1>
+          <p>Administrative WebUI</p>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-link active" data-view="dashboard">Dashboard</button>
+        <button class="nav-link" data-view="configuration">Configuration</button>
+        <button class="nav-link" data-view="authorization">Authorization Rules</button>
+        <button class="nav-link" data-view="queue">Pending Enrollments</button>
+        <button class="nav-link" data-view="history">Enrollment History</button>
+        <button class="nav-link" data-view="systemd">systemd</button>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <header class="page-header">
+        <div>
+          <h2 id="page-title">Dashboard</h2>
+          <p id="page-subtitle">Server health, enrollment state, and administrative actions.</p>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-button" class="primary-button">Refresh</button>
+        </div>
+      </header>
+
+      <section id="message-banner" class="message-banner hidden"></section>
+
+      <section id="dashboard-view" class="view active">
+        <div class="cards">
+          <article class="card">
+            <h3>EST Listener</h3>
+            <p class="metric" id="est-listener">Loading…</p>
+          </article>
+          <article class="card">
+            <h3>WebUI Listener</h3>
+            <p class="metric" id="webui-listener">Loading…</p>
+          </article>
+          <article class="card">
+            <h3>Pending Requests</h3>
+            <p class="metric" id="pending-count">Loading…</p>
+          </article>
+          <article class="card">
+            <h3>Issued Enrollments</h3>
+            <p class="metric" id="issued-count">Loading…</p>
+          </article>
+        </div>
+
+        <div class="panel-grid">
+          <article class="panel">
+            <h3>Service Summary</h3>
+            <dl class="kv-list">
+              <div><dt>systemd unit</dt><dd id="systemd-unit">Loading…</dd></div>
+              <div><dt>WebUI auth mode</dt><dd id="webui-auth-mode">Loading…</dd></div>
+              <div><dt>WebUI enabled</dt><dd id="webui-enabled">Loading…</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel">
+            <h3>Next Implementation Steps</h3>
+            <ul class="bullet-list">
+              <li>Expose editable configuration and rule APIs</li>
+              <li>Show pending requests with approve and reject actions</li>
+              <li>Add enrollment history browsing</li>
+              <li>Add controlled systemd status and restart actions</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="configuration-view" class="view">
+        <article class="panel">
+          <h3>Configuration</h3>
+          <pre id="config-output" class="code-block">Loading…</pre>
+        </article>
+      </section>
+
+      <section id="authorization-view" class="view">
+        <article class="panel">
+          <h3>Authorization Rules</h3>
+          <p class="muted">Per-enrollment authorization rules will appear here.</p>
+        </article>
+      </section>
+
+      <section id="queue-view" class="view">
+        <article class="panel">
+          <h3>Pending Enrollments</h3>
+          <p class="muted">Pending deferred EST requests will appear here.</p>
+        </article>
+      </section>
+
+      <section id="history-view" class="view">
+        <article class="panel">
+          <h3>Enrollment History</h3>
+          <p class="muted">Completed enrollment artifacts will appear here.</p>
+        </article>
+      </section>
+
+      <section id="systemd-view" class="view">
+        <article class="panel">
+          <h3>systemd Control</h3>
+          <p class="muted">Service status and control actions will appear here.</p>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

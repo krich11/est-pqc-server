@@ -93,6 +93,15 @@ ml_dsa_supported = true
 ## Current Architectural Decision
 Bootstrap is complete with a strict system-OpenSSL path and verified PQ capability detection. FIPS enablement remains deferred until execution on a Linux system with an installed FIPS provider. The authoritative EST QA topology is now fixed: the EST server runs on Linux host `192.168.200.120`, while the test client runs on the local development system and performs remote RFC 7030 validation against that Linux host during every stage of development.
 
+The EST runtime now also includes an embedded HTTPS WebUI administration plane. The WebUI is designed as a local/admin-facing surface for:
+- runtime status inspection
+- effective config and enrollment-rule inspection
+- pending enrollment approval and rejection
+- issued enrollment history review
+- basic `systemd` lifecycle actions for the configured EST service unit
+
+Manual authorization is implemented as persisted EST state rather than in-memory queues. Enrollment requests that match a `manual` rule are stored under `logs/pending/<operation>/<artifact_id>/` with a `status.json` record and replayed on retry after administrator approval.
+
 ## Linux-Hosted Validation Adjustments
 - The Linux host uses system OpenSSL `3.0.2`, so remote EST runtime must not depend on macOS-specific configured absolute OpenSSL paths
 - EST runtime OpenSSL detection was corrected to fall back to the system `openssl` binary when configured absolute paths are missing on the active host
@@ -111,6 +120,11 @@ The EST server runtime now supports configuration-file and CLI override control 
 - maximum request body size
 - default Retry-After value for deferred EST responses
 - recorded ML-KEM and ML-DSA capability flags
+- WebUI enablement, bind address, port, TLS certificate path, and TLS private key path
+- WebUI authentication mode (`basic` or `mtls`)
+- WebUI admin username and Argon2 password hash
+- WebUI-managed `systemd` unit name
+- enrollment authorization default action and ordered rule list
 
 ## Deployment Artifacts
 - `config.toml.example`
@@ -127,6 +141,33 @@ The EST server runtime now supports configuration-file and CLI override control 
 - `est-server.service.example`
 - `est-server-0.1.0-1.x86_64.rpm`
 
+## WebUI and Enrollment Authorization Architecture
+- WebUI backend implementation: `src/webui/mod.rs`
+- WebUI frontend assets: `webui/static/index.html`, `webui/static/app.js`, `webui/static/style.css`
+- EST/WebUI shared state model:
+  - `EnrollmentRequestContext`
+  - `PendingEnrollmentRecord`
+  - `PendingEnrollmentState`
+  - `EnrollmentArtifactSummary`
+- WebUI API surface:
+  - `GET /api/status`
+  - `GET /api/config`
+  - `GET /api/rules`
+  - `GET /api/enrollment/pending`
+  - `GET /api/enrollment/history`
+  - `POST /api/enrollment/pending/:operation/:artifact_id/approve`
+  - `POST /api/enrollment/pending/:operation/:artifact_id/reject`
+  - `GET /api/systemd/status`
+  - `POST /api/systemd/:action`
+- Enrollment authorization actions:
+  - `auto`
+  - `manual`
+  - `reject`
+- Approval persistence model:
+  - pending manual or deferred requests remain on disk until replayed or rejected
+  - approved requests are removed from pending storage before issuance
+  - rejected requests remain explicitly marked with a rejection reason for deterministic retry behavior
+
 ## Repository Publication
 - Public repository: `https://github.com/krich11/est-pqc-server`
 - Repository README now documents:
@@ -135,3 +176,4 @@ The EST server runtime now supports configuration-file and CLI override control 
   - validation workflow
   - administrator configuration and systemd deployment
   - packaging workflow
+  - WebUI behavior and enrollment-rule configuration
