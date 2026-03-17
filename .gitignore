@@ -1,0 +1,7 @@
+/target
+/.cline
+/.clinerules
+/logs/*
+!/logs/.gitkeep
+*.rpm
+.DS_Store

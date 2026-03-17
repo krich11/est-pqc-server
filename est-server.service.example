@@ -1,0 +1,30 @@
+[Unit]
+Description=EST Rust Server
+Documentation=https://datatracker.ietf.org/doc/html/rfc7030
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Demo-only known-good setting:
+# The provided demo CA private key is required for EST issuance and is typically root-owned.
+# After replacing demo materials with production credentials, switch to a dedicated service user.
+User=root
+Group=root
+WorkingDirectory=/opt/est-server
+Environment=RUST_LOG=info
+Environment=OPENSSL=openssl
+ExecStart=/opt/est-server/est-server --config /opt/est-server/config.toml.example
+# Example CLI overrides:
+# ExecStart=/opt/est-server/est-server --config /opt/est-server/config.toml.example --listen-address 127.0.0.1 --listen-port 9443 --openssl-binary openssl
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/est-server/logs
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

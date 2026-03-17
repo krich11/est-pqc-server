@@ -1,0 +1,39 @@
+[package]
+name = "est-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["EST Server Project"]
+license = "MIT"
+description = "RFC 7030 Enrollment over Secure Transport server implemented in Rust with system OpenSSL 3"
+build = "build.rs"
+
+[dependencies]
+openssl = { version = "0.10", default-features = false }
+tokio = { version = "1", features = ["full"] }
+tokio-openssl = "0.6"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+axum = { version = "0.7", features = ["http1", "http2"] }
+dialoguer = "0.11"
+ratatui = "0.28"
+crossterm = "0.28"
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/est-server", dest = "/usr/bin/est-server", mode = "0755" },
+]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
