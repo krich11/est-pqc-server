@@ -119,7 +119,8 @@ cargo generate-rpm
 - This project uses the system OpenSSL 3 library only.
 - No vendored OpenSSL or alternate crypto provider is used.
 - FIPS mode depends on host OpenSSL provider availability.
-- Linux OpenSSL 3.0.x may not support all PQ signature algorithms used by the demo set.
+- PQC capabilities used by this project require OpenSSL 3.5 or later.
+- The Linux validation host currently uses OpenSSL 3.0.2, so PQC algorithms are not available there.
 
 ## License
 
