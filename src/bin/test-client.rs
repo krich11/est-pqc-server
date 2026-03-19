@@ -803,7 +803,11 @@ fn validate_async_enrollment_round_trip(
         &["--header".to_owned(), "Prefer: respond-async".to_owned()],
         &format!("{} follow-up request", spec.operation),
     )?;
-    ensure_status(&second, 200, &format!("{} follow-up request", spec.operation))?;
+    ensure_status(
+        &second,
+        200,
+        &format!("{} follow-up request", spec.operation),
+    )?;
 
     if let Some(ssh_host) = ssh_host {
         validate_remote_pending_artifacts(

@@ -251,8 +251,9 @@ async fn main() -> Result<()> {
 
         if runtime_config.webui.enabled {
             let webui_config = runtime_config.clone();
+            let webui_config_path = cli.config.clone();
             tokio::spawn(async move {
-                if let Err(error) = webui::run_webui(webui_config).await {
+                if let Err(error) = webui::run_webui(webui_config_path, webui_config).await {
                     tracing::error!("WebUI listener failed: {error:#}");
                 }
             });
@@ -897,6 +898,7 @@ fn prompt_for_configuration(report: &EnvironmentReport) -> Result<est::ServerCon
             auth_mode: webui_auth_mode,
             admin_username: webui_admin_username,
             admin_password_hash: webui_admin_password_hash,
+            users: Vec::new(),
             systemd_unit_name: webui_systemd_unit_name,
         },
         enrollment: est::EnrollmentConfig::default(),

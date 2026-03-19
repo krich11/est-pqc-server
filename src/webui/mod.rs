@@ -503,17 +503,14 @@ async fn api_upload_leaf_certificate(
     let certificate =
         upload_leaf_certificate(&state.certificate_store_path, payload, &openssl_binary).map_err(
             |error| {
+                let message = error.to_string();
                 log_webui_failure(
                     Some(&actor),
                     "upload-leaf-certificate",
                     &format!("filename={filename}"),
-                    &error.to_string(),
+                    &message,
                 );
-                if error.to_string() == "The Trusted CA must be loaded first." {
-                    WebUiError::Message(StatusCode::BAD_REQUEST, error.to_string())
-                } else {
-                    internal_error(error)
-                }
+                WebUiError::Message(StatusCode::BAD_REQUEST, message)
             },
         )?;
     Ok(Json(certificate))
