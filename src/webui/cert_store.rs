@@ -232,7 +232,7 @@ pub fn upload_leaf_certificate(
     }
 
     validate_leaf_certificate_trust(root, openssl_binary, &leaf_certificate, &chain_certificates)
-        .map_err(|_| anyhow!(trust_error_message.clone()))?;
+        .with_context(|| trust_error_message.clone())?;
 
     let leaf_detail = decode_certificate(&leaf_certificate)?;
     let fingerprint = leaf_detail.fingerprint_sha256.clone();
@@ -327,15 +327,25 @@ fn validate_leaf_certificate_trust(
     let chain_path = if chain_certificates.is_empty() {
         None
     } else {
-        let chain_pem = chain_certificates
-            .iter()
-            .map(|certificate| certificate.to_pem())
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to serialize uploaded P12 chain certificates")?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        Some(write_temp_file("leaf-chain", "pem", &chain_pem)?)
+        let mut chain_pem = Vec::new();
+
+        for certificate in chain_certificates {
+            if is_self_signed_certificate(certificate)? {
+                continue;
+            }
+
+            chain_pem.extend(
+                certificate
+                    .to_pem()
+                    .context("failed to serialize uploaded P12 chain certificates")?,
+            );
+        }
+
+        if chain_pem.is_empty() {
+            None
+        } else {
+            Some(write_temp_file("leaf-chain", "pem", &chain_pem)?)
+        }
     };
 
     let mut command = Command::new(openssl_binary);
@@ -368,6 +378,11 @@ fn validate_leaf_certificate_trust(
     }
 
     Ok(())
+}
+
+fn is_self_signed_certificate(certificate: &X509) -> Result<bool> {
+    Ok(x509_name_to_string(certificate.subject_name())?
+        == x509_name_to_string(certificate.issuer_name())?)
 }
 
 fn trusted_ca_bundle(root: &Path) -> Result<Vec<u8>> {
