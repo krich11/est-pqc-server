@@ -116,6 +116,35 @@ pub enum WebUiAuthMode {
     Mtls,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebUiUserRole {
+    Auditor,
+    Admin,
+    #[default]
+    SuperAdmin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WebUiUser {
+    pub username: String,
+    pub password_hash: String,
+    pub role: WebUiUserRole,
+    pub enabled: bool,
+}
+
+impl Default for WebUiUser {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            password_hash: String::new(),
+            role: WebUiUserRole::SuperAdmin,
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebUiConfig {
@@ -127,6 +156,7 @@ pub struct WebUiConfig {
     pub auth_mode: WebUiAuthMode,
     pub admin_username: String,
     pub admin_password_hash: String,
+    pub users: Vec<WebUiUser>,
     pub systemd_unit_name: String,
 }
 
@@ -141,6 +171,7 @@ impl Default for WebUiConfig {
             auth_mode: WebUiAuthMode::Basic,
             admin_username: DEFAULT_WEBUI_ADMIN_USERNAME.to_owned(),
             admin_password_hash: String::new(),
+            users: Vec::new(),
             systemd_unit_name: DEFAULT_SYSTEMD_UNIT_NAME.to_owned(),
         }
     }
@@ -578,13 +609,32 @@ fn validate_server_config(config: &ServerConfig) -> Result<()> {
         if config.webui.tls_private_key_path.trim().is_empty() {
             bail!("webui.tls_private_key_path must not be empty when WebUI is enabled");
         }
-        if config.webui.admin_username.trim().is_empty() {
-            bail!("webui.admin_username must not be empty when WebUI basic auth is enabled");
-        }
-        if matches!(config.webui.auth_mode, WebUiAuthMode::Basic)
-            && config.webui.admin_password_hash.trim().is_empty()
-        {
-            bail!("webui.admin_password_hash must not be empty when WebUI basic auth is enabled");
+        if matches!(config.webui.auth_mode, WebUiAuthMode::Basic) {
+            if config.webui.users.is_empty() {
+                if config.webui.admin_username.trim().is_empty() {
+                    bail!(
+                        "webui.admin_username must not be empty when WebUI basic auth is enabled"
+                    );
+                }
+                if config.webui.admin_password_hash.trim().is_empty() {
+                    bail!("webui.admin_password_hash must not be empty when WebUI basic auth is enabled");
+                }
+            } else {
+                let enabled_users = config
+                    .webui
+                    .users
+                    .iter()
+                    .filter(|user| user.enabled)
+                    .count();
+                if enabled_users == 0 {
+                    bail!("webui.users must include at least one enabled user when WebUI basic auth is enabled");
+                }
+                if config.webui.users.iter().any(|user| {
+                    user.username.trim().is_empty() || user.password_hash.trim().is_empty()
+                }) {
+                    bail!("webui.users entries must include non-empty username and password_hash values");
+                }
+            }
         }
         if config.webui.systemd_unit_name.trim().is_empty() {
             bail!("webui.systemd_unit_name must not be empty when WebUI is enabled");

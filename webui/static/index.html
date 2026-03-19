@@ -20,21 +20,46 @@
       <nav class="nav">
         <button class="nav-link active" data-view="dashboard">Dashboard</button>
         <button class="nav-link" data-view="configuration">Configuration</button>
+        <button class="nav-link" data-view="certificates">Certificate Store</button>
         <button class="nav-link" data-view="authorization">Authorization Rules</button>
         <button class="nav-link" data-view="queue">Pending Enrollments</button>
         <button class="nav-link" data-view="history">Enrollment History</button>
+        <button class="nav-link" data-view="users">Users</button>
         <button class="nav-link" data-view="systemd">systemd</button>
       </nav>
+
+      <div class="sidebar-footer">
+        <button id="open-help-button" class="secondary-button sidebar-help-button" type="button">
+          Help & Docs
+        </button>
+      </div>
     </aside>
 
     <main class="main-content">
       <header class="page-header">
         <div>
-          <h2 id="page-title">Dashboard</h2>
+          <div class="page-heading-row">
+            <h2 id="page-title">Dashboard</h2>
+            <button
+              class="help-chip"
+              type="button"
+              data-help-view="dashboard"
+              aria-label="Open help for this view"
+              title="Open help for this view"
+            >
+              ?
+            </button>
+          </div>
           <p id="page-subtitle">Server health, enrollment state, and administrative actions.</p>
         </div>
         <div class="header-actions">
-          <button id="refresh-button" class="primary-button">Refresh</button>
+          <div class="identity-chip">
+            <span id="current-username">Unknown user</span>
+            <span id="current-role" class="role-badge">unknown</span>
+            <span id="read-only-badge" class="status-pill hidden">read-only</span>
+          </div>
+          <button id="refresh-button" class="primary-button" type="button">Refresh</button>
+          <button id="logout-button" class="secondary-button" type="button">Logout</button>
         </div>
       </header>
 
@@ -65,18 +90,31 @@
             <h3>Service Summary</h3>
             <dl class="kv-list">
               <div><dt>systemd unit</dt><dd id="systemd-unit">Loading…</dd></div>
+              <div><dt>systemd active state</dt><dd id="dashboard-systemd-active">Loading…</dd></div>
+              <div><dt>systemd enabled</dt><dd id="dashboard-systemd-enabled">Loading…</dd></div>
               <div><dt>WebUI auth mode</dt><dd id="webui-auth-mode">Loading…</dd></div>
               <div><dt>WebUI enabled</dt><dd id="webui-enabled">Loading…</dd></div>
+              <div><dt>Current user</dt><dd id="dashboard-current-user">Loading…</dd></div>
             </dl>
           </article>
 
           <article class="panel">
-            <h3>Next Implementation Steps</h3>
+            <div class="section-heading">
+              <h3>Account Access Model</h3>
+              <button
+                class="help-inline"
+                type="button"
+                data-help-view="users"
+                aria-label="Help for user access model"
+              >
+                ⓘ
+              </button>
+            </div>
             <ul class="bullet-list">
-              <li>Expose editable configuration and rule APIs</li>
-              <li>Show pending requests with approve and reject actions</li>
-              <li>Add enrollment history browsing</li>
-              <li>Add controlled systemd status and restart actions</li>
+              <li><strong>super-admin</strong> can add, remove, enable, disable, and update users</li>
+              <li><strong>admin</strong> can edit configuration and perform operational WebUI actions except managing users</li>
+              <li><strong>auditor</strong> can view all information but cannot perform write actions</li>
+              <li>all users can change their own password</li>
             </ul>
           </article>
         </div>
@@ -84,40 +122,648 @@
 
       <section id="configuration-view" class="view">
         <article class="panel">
-          <h3>Configuration</h3>
-          <pre id="config-output" class="code-block">Loading…</pre>
+          <div class="panel-header">
+            <div>
+              <div class="section-heading">
+                <h3>Configuration</h3>
+                <button
+                  class="help-inline"
+                  type="button"
+                  data-help-view="configuration"
+                  aria-label="Help for configuration view"
+                >
+                  ⓘ
+                </button>
+              </div>
+              <p class="muted">Edit the runtime configuration in GUI mode or inspect the serialized configuration in text mode.</p>
+            </div>
+            <div class="header-actions">
+              <button id="save-config-button" class="primary-button hidden" type="button">Save Configuration</button>
+              <div class="segmented-control" role="tablist" aria-label="Configuration display mode">
+                <button id="config-mode-gui" class="segment active" type="button" data-config-mode="gui">GUI</button>
+                <button id="config-mode-text" class="segment" type="button" data-config-mode="text">Text</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="config-gui" class="config-groups">
+            <section class="config-group" data-config-section="server">
+              <button class="config-group-header collapsible-trigger" type="button" data-config-collapse="server">
+                <div>
+                  <h4>Server</h4>
+                  <p class="muted">EST listener, TLS version, crypto, and request sizing.</p>
+                </div>
+                <span class="collapse-indicator">▾</span>
+              </button>
+              <div class="config-group-body">
+                <div class="config-field-grid">
+                  <label class="field">
+                    <span>listen address</span>
+                    <input id="config-listen-address" data-config-path="listen_address" type="text">
+                  </label>
+                  <label class="field">
+                    <span>listen port</span>
+                    <input id="config-listen-port" data-config-path="listen_port" type="number" min="1" step="1">
+                  </label>
+                  <label class="field">
+                    <span>TLS version</span>
+                    <input id="config-tls-version" data-config-path="tls_version" type="text">
+                  </label>
+                  <label class="field">
+                    <span>cipher suite</span>
+                    <input id="config-cipher-suite" data-config-path="preferred_tls_cipher_suite" type="text">
+                  </label>
+                  <label class="field">
+                    <span>key type</span>
+                    <input id="config-key-type" data-config-path="key_type" type="text">
+                  </label>
+                  <label class="field checkbox-field">
+                    <span>FIPS enabled</span>
+                    <input id="config-enable-fips" data-config-path="enable_fips" type="checkbox">
+                  </label>
+                  <label class="field">
+                    <span>max request body bytes</span>
+                    <input id="config-max-request-body-bytes" data-config-path="max_request_body_bytes" type="number" min="1" step="1">
+                  </label>
+                  <label class="field">
+                    <span>default retry after seconds</span>
+                    <input id="config-default-retry-after-seconds" data-config-path="default_retry_after_seconds" type="number" min="1" step="1">
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section class="config-group" data-config-section="certificates">
+              <button class="config-group-header collapsible-trigger" type="button" data-config-collapse="certificates">
+                <div>
+                  <h4>Certificates & Keys</h4>
+                  <p class="muted">Paths used for issuance, TLS termination, and client-auth validation.</p>
+                </div>
+                <span class="collapse-indicator">▾</span>
+              </button>
+              <div class="config-group-body">
+                <div class="config-field-grid">
+                  <label class="field">
+                    <span>CA certificate</span>
+                    <input id="config-ca-certificate-path" data-config-path="ca_certificate_path" type="text">
+                  </label>
+                  <label class="field">
+                    <span>CA private key</span>
+                    <input id="config-ca-private-key-path" data-config-path="ca_private_key_path" type="text">
+                  </label>
+                  <label class="field">
+                    <span>client-auth CA certificate</span>
+                    <input id="config-client-auth-ca-certificate-path" data-config-path="client_auth_ca_certificate_path" type="text">
+                  </label>
+                  <label class="field">
+                    <span>TLS certificate</span>
+                    <input id="config-tls-certificate-path" data-config-path="tls_certificate_path" type="text">
+                  </label>
+                  <label class="field">
+                    <span>TLS private key</span>
+                    <input id="config-tls-private-key-path" data-config-path="tls_private_key_path" type="text">
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section class="config-group" data-config-section="enrollment">
+              <button class="config-group-header collapsible-trigger" type="button" data-config-collapse="enrollment">
+                <div>
+                  <h4>Enrollment</h4>
+                  <p class="muted">Storage directories and authorization defaults for EST operations.</p>
+                </div>
+                <span class="collapse-indicator">▾</span>
+              </button>
+              <div class="config-group-body">
+                <div class="config-field-grid">
+                  <label class="field">
+                    <span>enrollment storage dir</span>
+                    <input id="config-enrollment-storage-dir" data-config-path="enrollment_storage_dir" type="text">
+                  </label>
+                  <label class="field">
+                    <span>pending enrollment dir</span>
+                    <input id="config-pending-enrollment-dir" data-config-path="pending_enrollment_dir" type="text">
+                  </label>
+                  <label class="field">
+                    <span>default action</span>
+                    <input id="config-enrollment-default-action" data-config-path="enrollment.default_action" type="text" readonly>
+                  </label>
+                  <label class="field">
+                    <span>rule count</span>
+                    <input id="config-enrollment-rule-count" data-config-path="enrollment.rules.length" type="text" readonly>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section class="config-group" data-config-section="webui">
+              <button class="config-group-header collapsible-trigger" type="button" data-config-collapse="webui">
+                <div>
+                  <h4>WebUI</h4>
+                  <p class="muted">Administrative listener, auth mode, and managed service settings.</p>
+                </div>
+                <span class="collapse-indicator">▾</span>
+              </button>
+              <div class="config-group-body">
+                <div class="config-field-grid">
+                  <label class="field checkbox-field">
+                    <span>enabled</span>
+                    <input id="config-webui-enabled" data-config-path="webui.enabled" type="checkbox">
+                  </label>
+                  <label class="field">
+                    <span>listen address</span>
+                    <input id="config-webui-listen-address" data-config-path="webui.listen_address" type="text">
+                  </label>
+                  <label class="field">
+                    <span>listen port</span>
+                    <input id="config-webui-listen-port" data-config-path="webui.listen_port" type="number" min="1" step="1">
+                  </label>
+                  <label class="field">
+                    <span>TLS certificate</span>
+                    <input id="config-webui-tls-certificate-path" data-config-path="webui.tls_certificate_path" type="text">
+                  </label>
+                  <label class="field">
+                    <span>TLS private key</span>
+                    <input id="config-webui-tls-private-key-path" data-config-path="webui.tls_private_key_path" type="text">
+                  </label>
+                  <label class="field">
+                    <span>auth mode</span>
+                    <select id="config-webui-auth-mode" data-config-path="webui.auth_mode">
+                      <option value="basic">basic</option>
+                      <option value="mtls">mtls</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>admin username</span>
+                    <input id="config-webui-admin-username" data-config-path="webui.admin_username" type="text">
+                  </label>
+                  <label class="field">
+                    <span>systemd unit</span>
+                    <input id="config-webui-systemd-unit-name" data-config-path="webui.systemd_unit_name" type="text">
+                  </label>
+                  <label class="field">
+                    <span>managed users</span>
+                    <input id="config-webui-user-count" data-config-path="webui.users.length" type="text" readonly>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section class="config-group" data-config-section="platform">
+              <button class="config-group-header collapsible-trigger" type="button" data-config-collapse="platform">
+                <div>
+                  <h4>Platform</h4>
+                  <p class="muted">OpenSSL paths and capability flags detected for the runtime environment.</p>
+                </div>
+                <span class="collapse-indicator">▾</span>
+              </button>
+              <div class="config-group-body">
+                <div class="config-field-grid">
+                  <label class="field">
+                    <span>OpenSSL dir</span>
+                    <input id="config-openssl-dir" data-config-path="openssl_dir" type="text">
+                  </label>
+                  <label class="field">
+                    <span>OpenSSL binary</span>
+                    <input id="config-openssl-binary" data-config-path="openssl_binary" type="text">
+                  </label>
+                  <label class="field checkbox-field">
+                    <span>ML-KEM supported</span>
+                    <input id="config-ml-kem-supported" data-config-path="ml_kem_supported" type="checkbox">
+                  </label>
+                  <label class="field checkbox-field">
+                    <span>ML-DSA supported</span>
+                    <input id="config-ml-dsa-supported" data-config-path="ml_dsa_supported" type="checkbox">
+                  </label>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <pre id="config-output" class="code-block hidden">Loading…</pre>
         </article>
+      </section>
+
+      <section id="certificates-view" class="view">
+        <div class="panel-grid certificate-store-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="section-heading">
+                  <h3>Trusted CA</h3>
+                  <button
+                    class="help-inline"
+                    type="button"
+                    data-help-view="certificates"
+                    aria-label="Help for certificate store"
+                  >
+                    ⓘ
+                  </button>
+                </div>
+                <p class="muted">Load PEM CA certificates used to validate imported P12 leaf certificates.</p>
+              </div>
+              <button id="reload-trusted-ca-button" class="secondary-button" type="button">Reload</button>
+            </div>
+
+            <form id="upload-trusted-ca-form" class="stack-form inline-form">
+              <label class="field">
+                <span>Trusted CA PEM</span>
+                <input id="trusted-ca-file" type="file" accept=".pem,.crt,.cer" required>
+              </label>
+              <button id="upload-trusted-ca-button" type="submit" class="primary-button">Load Trusted CA</button>
+            </form>
+
+            <div id="trusted-ca-inline-notice" class="inline-notice hidden"></div>
+
+            <div class="table-wrapper">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Subject</th>
+                    <th>Issuer</th>
+                    <th>Expires</th>
+                    <th>Fingerprint</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="trusted-ca-table-body">
+                  <tr>
+                    <td colspan="5" class="muted">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Leaf Certificates</h3>
+                <p class="muted">Load P12 bundles for EST and WebUI leaf certificates after the issuing Trusted CA is present.</p>
+              </div>
+              <button id="reload-leaf-certificates-button" class="secondary-button" type="button">Reload</button>
+            </div>
+
+            <form id="upload-leaf-certificate-form" class="stack-form inline-form">
+              <label class="field">
+                <span>Leaf P12</span>
+                <input id="leaf-certificate-file" type="file" accept=".p12,.pfx" required>
+              </label>
+              <label class="field">
+                <span>P12 password</span>
+                <input id="leaf-certificate-password" type="password" autocomplete="off">
+              </label>
+              <button id="upload-leaf-certificate-button" type="submit" class="primary-button">Load Leaf Certificate</button>
+            </form>
+
+            <div id="leaf-certificates-inline-notice" class="inline-notice hidden"></div>
+
+            <div class="table-wrapper">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Subject</th>
+                    <th>Issuer</th>
+                    <th>Expires</th>
+                    <th>Fingerprint</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="leaf-certificates-table-body">
+                  <tr>
+                    <td colspan="5" class="muted">Loading…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </div>
       </section>
 
       <section id="authorization-view" class="view">
         <article class="panel">
-          <h3>Authorization Rules</h3>
-          <p class="muted">Per-enrollment authorization rules will appear here.</p>
+          <div class="panel-header">
+            <div>
+              <div class="section-heading">
+                <h3>Authorization Rules</h3>
+                <button
+                  class="help-inline"
+                  type="button"
+                  data-help-view="authorization"
+                  aria-label="Help for authorization rules"
+                >
+                  ⓘ
+                </button>
+              </div>
+              <p class="muted">Define the default authorization action and ordered policy rules for enrollments.</p>
+            </div>
+            <div class="header-actions">
+              <button id="add-rule-button" class="secondary-button" type="button">Add rule</button>
+              <button id="save-rules-button" class="primary-button" type="button">Save rules</button>
+            </div>
+          </div>
+
+          <div class="rules-toolbar">
+            <label class="field compact-field">
+              <span>Default action</span>
+              <select id="rules-default-action" name="default_action">
+                <option value="auto">auto</option>
+                <option value="manual">manual</option>
+                <option value="reject">reject</option>
+              </select>
+            </label>
+            <p class="muted rules-toolbar-copy">
+              Rules are evaluated top-to-bottom. The first matching rule wins.
+            </p>
+          </div>
+
+          <div id="authorization-rules-container" class="rules-list">
+            <div class="empty-state">Loading…</div>
+          </div>
         </article>
       </section>
 
       <section id="queue-view" class="view">
         <article class="panel">
-          <h3>Pending Enrollments</h3>
-          <p class="muted">Pending deferred EST requests will appear here.</p>
+          <div class="panel-header">
+            <div>
+              <h3>Pending Enrollments</h3>
+              <p class="muted">Deferred EST requests awaiting administrator action.</p>
+            </div>
+            <button id="reload-pending-button" class="secondary-button" type="button">Reload pending</button>
+          </div>
+
+          <div id="pending-enrollments-container" class="stack-list">
+            <div class="empty-state">Loading…</div>
+          </div>
         </article>
       </section>
 
       <section id="history-view" class="view">
         <article class="panel">
-          <h3>Enrollment History</h3>
-          <p class="muted">Completed enrollment artifacts will appear here.</p>
+          <div class="panel-header">
+            <div>
+              <h3>Enrollment History</h3>
+              <p class="muted">Completed EST enrollment artifacts and issuance history.</p>
+            </div>
+            <button id="reload-history-button" class="secondary-button" type="button">Reload history</button>
+          </div>
+
+          <div id="enrollment-history-container" class="stack-list">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </article>
+      </section>
+
+      <section id="users-view" class="view">
+        <div class="panel-grid users-grid">
+          <article class="panel">
+            <h3>Current Session</h3>
+            <dl class="kv-list">
+              <div><dt>username</dt><dd id="account-username">Loading…</dd></div>
+              <div><dt>role</dt><dd id="account-role">Loading…</dd></div>
+              <div><dt>can manage users</dt><dd id="account-can-manage-users">Loading…</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel">
+            <h3>Change Your Password</h3>
+            <form id="change-password-form" class="stack-form">
+              <label>
+                <span>Current password</span>
+                <input id="current-password" name="current_password" type="password" autocomplete="current-password" required>
+              </label>
+              <label>
+                <span>New password</span>
+                <input id="new-password" name="new_password" type="password" autocomplete="new-password" required>
+              </label>
+              <button type="submit" class="primary-button">Change password</button>
+            </form>
+          </article>
+        </div>
+
+        <article class="panel" id="user-management-panel">
+          <div class="panel-header">
+            <div>
+              <h3>User Management</h3>
+              <p class="muted">Only super-admin users can manage other accounts.</p>
+            </div>
+            <button id="reload-users-button" class="secondary-button" type="button">Reload users</button>
+          </div>
+
+          <form id="create-user-form" class="stack-form inline-form">
+            <label>
+              <span>Username</span>
+              <input id="create-username" name="username" type="text" autocomplete="username">
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="create-password" name="password" type="password" autocomplete="new-password">
+            </label>
+            <label>
+              <span>Role</span>
+              <select id="create-role" name="role">
+                <option value="auditor">auditor</option>
+                <option value="admin">admin</option>
+                <option value="super-admin">super-admin</option>
+              </select>
+            </label>
+            <button type="submit" class="primary-button">Create user</button>
+          </form>
+
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Role</th>
+                  <th>Enabled</th>
+                  <th>Password</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="users-table-body">
+                <tr>
+                  <td colspan="5" class="muted">Loading…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </article>
       </section>
 
       <section id="systemd-view" class="view">
-        <article class="panel">
-          <h3>systemd Control</h3>
-          <p class="muted">Service status and control actions will appear here.</p>
-        </article>
+        <div class="panel-grid systemd-grid systemd-stack-grid">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="section-heading">
+                  <h3>systemd Control</h3>
+                  <button
+                    class="help-inline"
+                    type="button"
+                    data-help-view="systemd"
+                    aria-label="Help for systemd controls"
+                  >
+                    ⓘ
+                  </button>
+                </div>
+                <p class="muted">Inspect service state and run controlled lifecycle actions.</p>
+              </div>
+              <button id="reload-systemd-button" class="secondary-button" type="button">Reload status</button>
+            </div>
+
+            <div class="status-pills">
+              <span class="status-pill" id="systemd-active-pill">active: loading…</span>
+              <span class="status-pill" id="systemd-enabled-pill">enabled: loading…</span>
+              <span class="status-pill" id="systemd-load-pill">load: loading…</span>
+            </div>
+
+            <dl class="kv-list">
+              <div><dt>unit</dt><dd id="systemd-detail-unit">Loading…</dd></div>
+              <div><dt>description</dt><dd id="systemd-detail-description">Loading…</dd></div>
+              <div><dt>active state</dt><dd id="systemd-detail-active-state">Loading…</dd></div>
+              <div><dt>sub-state</dt><dd id="systemd-detail-sub-state">Loading…</dd></div>
+              <div><dt>enabled state</dt><dd id="systemd-detail-enabled-state">Loading…</dd></div>
+              <div><dt>main PID</dt><dd id="systemd-detail-main-pid">Loading…</dd></div>
+              <div><dt>tasks</dt><dd id="systemd-detail-tasks-current">Loading…</dd></div>
+              <div><dt>memory</dt><dd id="systemd-detail-memory-current">Loading…</dd></div>
+            </dl>
+
+            <div class="systemd-actions">
+              <button class="primary-button systemd-action-button" type="button" data-systemd-action="start">Start</button>
+              <button class="secondary-button systemd-action-button" type="button" data-systemd-action="stop">Stop</button>
+              <button class="primary-button systemd-action-button" type="button" data-systemd-action="restart">Restart</button>
+              <button class="secondary-button systemd-action-button" type="button" data-systemd-action="reload">Reload</button>
+            </div>
+
+            <div id="systemd-action-result" class="inline-notice hidden"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <h3>Recent Journal</h3>
+                <p class="muted">Latest log lines from the configured unit.</p>
+              </div>
+            </div>
+            <pre id="systemd-journal-output" class="code-block">Loading…</pre>
+          </article>
+        </div>
       </section>
     </main>
   </div>
+
+  <aside id="help-drawer" class="help-drawer" aria-hidden="true">
+    <div class="help-drawer-header">
+      <div>
+        <h3 id="help-drawer-title">Help & Docs</h3>
+        <p id="help-drawer-subtitle" class="muted">Quick-reference guidance for the active view.</p>
+      </div>
+      <button id="close-help-button" class="secondary-button" type="button">Close</button>
+    </div>
+    <div id="help-drawer-body" class="help-drawer-body"></div>
+  </aside>
+
+  <div id="help-backdrop" class="help-backdrop hidden"></div>
+
+  <aside id="certificate-detail-drawer" class="help-drawer" aria-hidden="true">
+    <div class="help-drawer-header">
+      <div>
+        <h3 id="certificate-detail-title">Certificate Detail</h3>
+        <p id="certificate-detail-subtitle" class="muted">Decoded certificate fields and PEM view.</p>
+      </div>
+      <button id="close-certificate-detail-button" class="secondary-button" type="button">Close</button>
+    </div>
+    <div id="certificate-detail-body" class="help-drawer-body"></div>
+  </aside>
+
+  <div id="certificate-detail-backdrop" class="help-backdrop hidden"></div>
+
+  <template id="help-template-dashboard">
+    <h4>Dashboard</h4>
+    <p>The dashboard gives a quick summary of EST listener state, WebUI state, pending requests, and enrollment history counts.</p>
+    <ul>
+      <li><strong>Refresh</strong> reloads all visible WebUI data.</li>
+      <li><strong>Current user</strong> shows the authenticated session identity and role.</li>
+      <li><strong>systemd active/enabled</strong> mirrors the managed service state.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-configuration">
+    <h4>Configuration</h4>
+    <p>Use <strong>GUI</strong> mode for grouped editing or <strong>Text</strong> mode to inspect the full runtime configuration as formatted JSON.</p>
+    <ul>
+      <li>Each section can be collapsed or expanded independently.</li>
+      <li><strong>Save Configuration</strong> writes the current GUI values back to <code>config.toml</code>.</li>
+      <li>Readonly fields reflect values managed by other views.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-certificates">
+    <h4>Certificate Store</h4>
+    <p>The certificate store separates trust anchors from imported leaf certificates.</p>
+    <ul>
+      <li><strong>Trusted CA</strong> accepts PEM encoded CA certificates only.</li>
+      <li><strong>Leaf Certificates</strong> accepts P12 bundles only.</li>
+      <li>P12 imports are validated against the currently loaded Trusted CA store.</li>
+      <li>If trust cannot be established, load the issuing Trusted CA first.</li>
+      <li>Use <strong>View</strong> to decode certificate contents before assigning files in configuration.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-authorization">
+    <h4>Authorization Rules</h4>
+    <p>Rules are checked top-to-bottom. The first rule whose match fields all succeed determines the action.</p>
+    <ul>
+      <li><strong>auto</strong> issues immediately unless the EST client requested asynchronous handling.</li>
+      <li><strong>manual</strong> stores the request under pending enrollment storage for administrator review.</li>
+      <li><strong>reject</strong> returns a policy rejection. Provide a reject reason for operator clarity.</li>
+      <li>Match fields accept regular expressions. Leave a field blank to ignore it.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-queue">
+    <h4>Pending Enrollments</h4>
+    <p>This view lists deferred enrollment requests waiting for approval or rejection.</p>
+    <ul>
+      <li><strong>Approve</strong> marks the request approved for replay on the next client retry.</li>
+      <li><strong>Reject</strong> stores an explicit rejection reason for deterministic retry behavior.</li>
+      <li>Each item shows the enrollment operation, artifact ID, matched rule, and request context.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-history">
+    <h4>Enrollment History</h4>
+    <p>This view lists persisted enrollment artifacts for issued EST requests.</p>
+    <ul>
+      <li>Each record includes the operation and artifact identifier.</li>
+      <li>Paths show where the stored CSR and issued certificate can be found on disk.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-users">
+    <h4>Users</h4>
+    <p>Only <strong>super-admin</strong> accounts can manage other users. All authenticated users can change their own password.</p>
+    <ul>
+      <li>Use <strong>Create user</strong> to add an account.</li>
+      <li>Use <strong>Set password</strong> to rotate another user's password.</li>
+      <li>Use <strong>Make auditor / admin / super-admin</strong> to change role.</li>
+      <li>Use <strong>Disable</strong> to prevent login without deleting the account.</li>
+    </ul>
+  </template>
+
+  <template id="help-template-systemd">
+    <h4>systemd</h4>
+    <p>The systemd view shows the configured unit state and recent journal lines, then allows safe lifecycle actions.</p>
+    <ul>
+      <li><strong>Start</strong> starts the configured unit.</li>
+      <li><strong>Stop</strong> stops it.</li>
+      <li><strong>Restart</strong> restarts the unit.</li>
+      <li><strong>Reload</strong> asks the service to reload its configuration if supported.</li>
+    </ul>
+  </template>
 
   <script src="/app.js"></script>
 </body>

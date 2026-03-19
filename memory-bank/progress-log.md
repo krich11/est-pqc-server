@@ -64,6 +64,14 @@ Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, RPM packaging, a
 - Added WebUI APIs for status, config, rules, pending enrollments, issued enrollment history, and approve/reject operations
 - Added WebUI-backed approval flow for `simpleenroll`, `simplereenroll`, and `serverkeygen`
 - Updated `README.md` to document WebUI operation, enrollment rules, and manual approval workflow
+- Added WebUI certificate store backend support in `src/webui/cert_store.rs`
+- Added certificate store APIs for Trusted CA and leaf certificate upload, list, decode/view, and delete
+- Added PEM-only Trusted CA storage and P12-only leaf certificate storage under `logs/certificate-store/`
+- Added P12 trust validation against the loaded Trusted CA store with the required operator message when trust is unavailable
+- Added decoded certificate detail views for Trusted CA and leaf certificates in the WebUI
+- Added editable WebUI configuration persistence through `POST /api/config`
+- Updated the configuration view to use collapsible sections with persisted collapse state
+- Added WebUI certificate store navigation, upload flows, delete flows, and certificate detail drawer rendering
 
 ## Validation Results
 Validated successfully with:
@@ -78,6 +86,7 @@ Validated successfully with:
 - local `./target/release/est-server --config ./config.toml --listen-address 127.0.0.1`
 - local `cargo check`
 - local `cargo test`
+- local `node --check webui/static/app.js`
 - local `cargo fmt --all --check`
 - local `cargo clippy --all-targets -- -D warnings`
 - Linux-host staged `/opt/est-server` deployment using `config.toml.example`
@@ -106,6 +115,10 @@ Linux-host validation on `192.168.200.120` used:
 - RFC 7030 EST server testing, QA, and RPM packaging are now being executed on Linux host `192.168.200.120`
 - The local system is the execution point for the EST validation client and targets the Linux-hosted EST server remotely
 - Linux OpenSSL `3.0.2` does not support `ML-DSA-87`, so `config.toml` was adjusted to `key_type = "rsa2048"` for Linux-hosted `serverkeygen` validation
+- QA EST endpoint remains on port `8443`
+- QA WebUI endpoint is on port `9443`
+- Current QA WebUI access succeeds over `http://192.168.200.120:9443`
+- QA service restarts must use `sudo systemctl restart est-server`
 
 ## Generated Configuration Snapshot
 ```toml
@@ -127,5 +140,99 @@ ml_dsa_supported = false
 - Treat local macOS builds as development-only compile checks
 - Upgrade the Linux host OpenSSL if PQ server-generated key algorithms such as ML-DSA must be validated there
 
+## Agent Workflow Guardrail: Remote Process Launches
+- Do **not** start long-running remote processes over SSH with malformed shell redirection such as HTML-escaped `<` or `>`; the remote shell treats that as literal text and the launch fails.
+- Do **not** background a remote process unless stdin, stdout, and stderr are fully detached on the remote side; otherwise the SSH session can remain attached and appear hung in the IDE terminal.
+- Do **not** rely on `cmd &` alone for remote persistence. Use a non-interactive SSH invocation plus a fully detached launcher such as `ssh -n ... 'nohup sh -c "... >/tmp/file.log 2>&1 </dev/null" >/dev/null 2>&1 &'`.
+- Prefer one-shot verification commands after launch, such as `pgrep`, `ss`, or `curl`, instead of leaving the initiating terminal attached.
+- Do **not** launch or restart persistent remote services from the IDE with `ssh ... nohup ... &` or similar backgrounding patterns at all. This has repeatedly left the local SSH client stuck and hung the user's terminal.
+- Do **not** use SSH background-launch commands as a recovery shortcut, even if they appear standard shell-safe.
+- For this project, persistent remote service control must use an existing remote supervisor such as `tmux`, `systemctl`, or another already-running session manager, or else stop and ask the user before attempting any new persistent launch method from the IDE.
+
+## Regression Test Harness Phase
+- Synced the latest project tree to the QA host `192.168.200.120`
+- Rebuilt the QA binary at `/home/krich/src/est-rust-server/target/release/est-server`
+- Deployed the rebuilt binary into the active service path `/opt/est-server/est-server`
+- Restarted the active QA service via `sudo systemctl restart est-server`
+- Verified the QA host is listening on:
+  - EST `8443`
+  - WebUI `9443`
+- Confirmed EST health on the QA host with `cacerts -> 200`
+- Confirmed WebUI health on the QA host with `GET /api/status -> 200` over HTTP
+- Prepared a demo-backed P12 artifact for regression testing:
+  - `demo/rsa-2048-client.p12`
+  - password: `changeit`
+- Added browser-assisted WebUI regression coverage in `scripts/webui-regression-test.cjs`
+- Added category-based regression orchestration in `scripts/run-regression-tests.sh`
+- Implemented selectable regression categories:
+  - `build`
+  - `est`
+  - `webui-auth`
+  - `webui-config`
+  - `webui-users`
+  - `webui-rules`
+  - `webui-certs`
+  - `webui-enrollment`
+  - `webui-systemd`
+  - `webui-gui`
+- Verified representative category execution:
+  - `webui-auth`
+  - `webui-certs`
+  - `webui-gui`
+
+## Current WebUI Certificate Store and Configuration Phase
+- The WebUI now exposes a certificate store concept with two sections:
+  - Trusted CA
+  - Leaf Certificates
+- Trusted CA uploads accept PEM certificates only and persist decoded metadata for browsing.
+- Leaf certificate uploads accept P12 bundles only and are validated against the Trusted CA store before import.
+- If no trust can be established during P12 import, the WebUI returns the operator message:
+  - `The Trusted CA must be loaded first.`
+- The configuration view now supports:
+  - grouped GUI editing
+  - persistence through `POST /api/config`
+  - collapsible sections with localStorage-backed collapse state
+  - read-only display for derived count fields
+- Certificate Store layout was updated from side-by-side panels to a top/bottom stacked layout.
+- systemd layout was updated from side-by-side panels to a top/bottom stacked layout.
+- Certificate upload file selectors were widened so full filenames are more visible.
+- WebUI failure logging was expanded with contextual action metadata for:
+  - config save failures
+  - certificate upload and delete failures
+  - rules save failures
+  - pending enrollment approve/reject failures
+  - systemd action failures
+  - user-management and password-change failures
+- The WebUI role model now includes:
+  - `super-admin` for user management
+  - `admin` for config, rules, certificate, enrollment, and systemd write actions
+  - `auditor` for read-only access
+- `admin` can now save runtime configuration through the WebUI.
+- `auditor` can view status, config, rules, users, certificates, enrollment data, and systemd status, but cannot perform write actions.
+- The frontend now exposes read-only behavior for auditors by:
+  - showing a read-only badge
+  - hiding or disabling write controls
+  - keeping view access available across the WebUI
+
+## Latest Validation
+- Local validation passed:
+  - `node --check webui/static/app.js`
+  - `cargo check`
+  - `cargo fmt --all --check`
+  - `cargo clippy --all-targets -- -D warnings`
+- QA deployment completed on `192.168.200.120`:
+  - synced workspace to `/home/krich/src/est-rust-server`
+  - rebuilt release binary remotely
+  - installed binary to `/opt/est-server/est-server`
+  - restarted service with `sudo systemctl restart est-server`
+- QA regression verification passed:
+  - `webui-config`
+  - `webui-users`
+  - `webui-certs`
+  - `webui-systemd`
+  - `webui-gui`
+- Evidence file:
+  - `test-results/regression-role-layout-report.md`
+
 ## Next Step
-Push the `webui` branch to GitHub, then proceed with any future release tagging, GitHub Releases publication, and follow-on development from the public repository `https://github.com/krich11/est-pqc-server`.
+Expand regression coverage further only as new WebUI behaviors are added; the current role, layout, and admin-write changes are deployed and validated on the Linux QA host.
