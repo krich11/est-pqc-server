@@ -153,6 +153,20 @@ When enabled, the WebUI serves an embedded HTTPS frontend with API endpoints for
 - `GET /api/systemd/status`
 - `POST /api/systemd/:action`
 
+The WebUI always serves over HTTPS on its configured listener.
+
+If `webui.tls_certificate_path` and `webui.tls_private_key_path` are both empty, the server automatically generates a unique self-signed WebUI certificate and private key at runtime under:
+
+- `logs/webui-tls/webui-self-signed.crt`
+- `logs/webui-tls/webui-self-signed.key`
+
+This self-signed certificate is intended for local/admin access and QA convenience. Browsers and API clients will show a certificate warning unless they are configured to trust the generated certificate or explicitly allow the self-signed connection.
+
+To use an operator-provided WebUI certificate instead of the generated one, set both of these configuration values:
+
+- `webui.tls_certificate_path`
+- `webui.tls_private_key_path`
+
 Basic-auth mode expects the configured admin username and Argon2 password hash.
 mTLS mode currently trusts the HTTPS listener and skips additional HTTP auth checks.
 

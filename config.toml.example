@@ -97,8 +97,10 @@ ml_dsa_supported = false
 enabled = true
 listen_address = "0.0.0.0"
 listen_port = 9443
-tls_certificate_path = "demo/rsa-2048-server.crt"
-tls_private_key_path = "demo/rsa-2048-server.key"
+# Leave these empty to auto-generate a unique self-signed HTTPS certificate for the WebUI.
+# Set both paths explicitly to use an operator-provided certificate and key instead.
+tls_certificate_path = ""
+tls_private_key_path = ""
 auth_mode = "basic"
 admin_username = "admin"
 admin_password_hash = "$argon2id$v=19$m=19456,t=2,p=1$VRUPCgBrVELjPii4IB4GBQ$3IsfqTxBcWbQPziNjKF5ZaM+WLtWT9RddlUSFDmZo8k"

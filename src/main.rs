@@ -376,7 +376,7 @@ fn ensure_bootstrap_directories() -> Result<()> {
 }
 
 fn ensure_runtime_directories() -> Result<()> {
-    for path in ["logs", "demo"] {
+    for path in ["logs", "logs/webui-tls", "demo"] {
         fs::create_dir_all(path).with_context(|| format!("failed to create `{path}`"))?;
     }
 
@@ -912,8 +912,8 @@ fn prompt_for_configuration(report: &EnvironmentReport) -> Result<est::ServerCon
             enabled: enable_webui,
             listen_address: webui_listen_address,
             listen_port: webui_listen_port,
-            tls_certificate_path: tls_certificate_path.clone(),
-            tls_private_key_path: tls_private_key_path.clone(),
+            tls_certificate_path: String::new(),
+            tls_private_key_path: String::new(),
             auth_mode: webui_auth_mode,
             admin_username: webui_admin_username,
             admin_password_hash: webui_admin_password_hash,
@@ -1087,12 +1087,6 @@ fn load_runtime_config(
 
     if config.webui.listen_address.trim().is_empty() {
         config.webui.listen_address = "127.0.0.1".to_owned();
-    }
-    if config.webui.tls_certificate_path.trim().is_empty() {
-        config.webui.tls_certificate_path = config.tls_certificate_path.clone();
-    }
-    if config.webui.tls_private_key_path.trim().is_empty() {
-        config.webui.tls_private_key_path = config.tls_private_key_path.clone();
     }
     if config.webui.admin_username.trim().is_empty() {
         config.webui.admin_username = "admin".to_owned();

@@ -4,7 +4,7 @@ set -u
 set -o pipefail
 
 EST_BASE_URL="https://192.168.200.120:8443"
-WEBUI_URL="http://192.168.200.120:9443"
+WEBUI_URL="https://192.168.200.120:9443"
 SSH_HOST="krich@192.168.200.120"
 REMOTE_PROJECT_PATH="/home/krich/src/est-rust-server"
 REPORT_PATH="test-results/regression-report.md"
@@ -30,7 +30,7 @@ TRUSTED_CA_PEM_PATH="demo/demo-ca.crt"
 LEAF_P12_PATH="demo/rsa-2048-client.p12"
 LEAF_P12_PASSWORD="changeit"
 
-WEBUI_SCHEME="http"
+WEBUI_SCHEME="https"
 WEBUI_HOST="192.168.200.120"
 WEBUI_PORT="9443"
 
@@ -102,7 +102,7 @@ Categories:
 Examples:
   ./scripts/run-regression-tests.sh all
   ./scripts/run-regression-tests.sh est webui-auth webui-certs
-  ./scripts/run-regression-tests.sh --base-url https://192.168.200.120:8443 --webui-url http://192.168.200.120:9443 webui-gui
+  ./scripts/run-regression-tests.sh --base-url https://192.168.200.120:8443 --webui-url https://192.168.200.120:9443 webui-gui
 EOF
 }
 
@@ -122,7 +122,11 @@ set_webui_url() {
     WEBUI_PORT="${host_port##*:}"
   else
     WEBUI_HOST="${host_port}"
-    WEBUI_PORT="80"
+    if [[ "${WEBUI_SCHEME}" == "https" ]]; then
+      WEBUI_PORT="443"
+    else
+      WEBUI_PORT="80"
+    fi
   fi
 }
 
@@ -235,6 +239,10 @@ http_request() {
 
   if [[ -n "${body}" ]]; then
     curl_args+=(-H "Content-Type: application/json" --data "${body}")
+  fi
+
+  if [[ "${WEBUI_SCHEME}" == "https" ]]; then
+    curl_args+=(--insecure)
   fi
 
   HTTP_STATUS="$(curl "${curl_args[@]}" "${url}")"
@@ -503,6 +511,7 @@ test_webui_auth_alt_me() {
 test_webui_auth_browser_switch() {
   WEBUI_HOST="${WEBUI_HOST}" \
   WEBUI_PORT="${WEBUI_PORT}" \
+  WEBUI_SCHEME="${WEBUI_SCHEME}" \
   node scripts/browser-auth-switch-test.cjs
 }
 
@@ -1006,7 +1015,7 @@ main() {
 
   ensure_tmp_dir
 
-  record_note "QA WebUI on port 9443 is currently reachable over plain HTTP at ${WEBUI_URL}."
+  record_note "QA WebUI on port 9443 is currently reachable over HTTPS at ${WEBUI_URL}."
   record_note "QA service restart method is systemctl via sudo systemctl restart est-server."
   record_note "QA WebUI credentials in active use for regression are ${WEBUI_ADMIN_USER}/*** and ${WEBUI_ALT_USER}/***."
 

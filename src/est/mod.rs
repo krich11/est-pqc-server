@@ -165,8 +165,8 @@ impl Default for WebUiConfig {
             enabled: false,
             listen_address: DEFAULT_WEBUI_LISTEN_ADDRESS.to_owned(),
             listen_port: 9443,
-            tls_certificate_path: DEFAULT_TLS_CERTIFICATE_PATH.to_owned(),
-            tls_private_key_path: DEFAULT_TLS_PRIVATE_KEY_PATH.to_owned(),
+            tls_certificate_path: String::new(),
+            tls_private_key_path: String::new(),
             auth_mode: WebUiAuthMode::Basic,
             admin_username: DEFAULT_WEBUI_ADMIN_USERNAME.to_owned(),
             admin_password_hash: String::new(),
@@ -543,12 +543,6 @@ fn normalize_server_config(config: &mut ServerConfig) {
     if config.webui.listen_address.trim().is_empty() {
         config.webui.listen_address = DEFAULT_WEBUI_LISTEN_ADDRESS.to_owned();
     }
-    if config.webui.tls_certificate_path.trim().is_empty() {
-        config.webui.tls_certificate_path = config.tls_certificate_path.clone();
-    }
-    if config.webui.tls_private_key_path.trim().is_empty() {
-        config.webui.tls_private_key_path = config.tls_private_key_path.clone();
-    }
     if config.webui.admin_username.trim().is_empty() {
         config.webui.admin_username = DEFAULT_WEBUI_ADMIN_USERNAME.to_owned();
     }
@@ -611,11 +605,12 @@ fn validate_server_config(config: &ServerConfig) -> Result<()> {
         if config.webui.listen_port == 0 {
             bail!("webui.listen_port must be greater than zero when WebUI is enabled");
         }
-        if config.webui.tls_certificate_path.trim().is_empty() {
-            bail!("webui.tls_certificate_path must not be empty when WebUI is enabled");
-        }
-        if config.webui.tls_private_key_path.trim().is_empty() {
-            bail!("webui.tls_private_key_path must not be empty when WebUI is enabled");
+        let webui_has_certificate = !config.webui.tls_certificate_path.trim().is_empty();
+        let webui_has_private_key = !config.webui.tls_private_key_path.trim().is_empty();
+        if webui_has_certificate != webui_has_private_key {
+            bail!(
+                "webui.tls_certificate_path and webui.tls_private_key_path must either both be set or both be empty"
+            );
         }
         if matches!(config.webui.auth_mode, WebUiAuthMode::Basic) {
             if config.webui.users.is_empty() {

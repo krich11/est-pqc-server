@@ -2,7 +2,8 @@ const { chromium } = require('playwright');
 
 const HOST = process.env.WEBUI_HOST || '192.168.200.120';
 const PORT = process.env.WEBUI_PORT || '9443';
-const BASE = `http://${HOST}:${PORT}`;
+const SCHEME = process.env.WEBUI_SCHEME || 'https';
+const BASE = `${SCHEME}://${HOST}:${PORT}`;
 
 const ADMIN_CANDIDATES = [
   { username: 'admin', password: 'aruba123', label: 'admin/aruba123' },
@@ -36,6 +37,7 @@ async function probeCredentials(browser, candidates) {
         username: candidate.username,
         password: candidate.password,
       },
+      ignoreHTTPSErrors: true,
     });
     const page = await context.newPage();
     const result = await navigate(page, '/');
@@ -72,6 +74,7 @@ async function probeCredentials(browser, candidates) {
         username: admin.username,
         password: admin.password,
       },
+      ignoreHTTPSErrors: true,
     });
     const adminPage = await adminContext.newPage();
 
@@ -106,6 +109,7 @@ async function probeCredentials(browser, candidates) {
         username: admin.username,
         password: admin.password,
       },
+      ignoreHTTPSErrors: true,
     });
     const adminFreshPage = await adminFreshContext.newPage();
 
@@ -122,6 +126,7 @@ async function probeCredentials(browser, candidates) {
         username: krich.username,
         password: krich.password,
       },
+      ignoreHTTPSErrors: true,
     });
     const krichPage = await krichContext.newPage();
 

@@ -2,7 +2,7 @@ const { chromium } = require("playwright");
 
 const HOST = process.env.WEBUI_HOST || "192.168.200.120";
 const PORT = process.env.WEBUI_PORT || "9443";
-const SCHEME = process.env.WEBUI_SCHEME || "http";
+const SCHEME = process.env.WEBUI_SCHEME || "https";
 const BASE = `${SCHEME}://${HOST}:${PORT}`;
 
 const ADMIN_USERNAME = process.env.WEBUI_ADMIN_USER || "admin";
@@ -368,6 +368,7 @@ async function exerciseSystemdView(page) {
       username: ADMIN_USERNAME,
       password: ADMIN_PASSWORD,
     },
+    ignoreHTTPSErrors: true,
   });
 
   context.on("dialog", async (dialog) => {

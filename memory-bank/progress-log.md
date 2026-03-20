@@ -74,6 +74,8 @@ Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, RPM packaging, a
 - Added WebUI certificate store navigation, upload flows, delete flows, and certificate detail drawer rendering
 - Updated the certificate store tables so Trusted CA shows `Common Name` first and omits redundant issuer display for self-signed trust anchors
 - Added per-leaf certificate service assignment state for `est`, `webui`, or both, persisted in certificate-store metadata and editable from the WebUI
+- Converted the WebUI listener to HTTPS using the existing OpenSSL/Tokio TLS serving pattern instead of plain HTTP
+- Added automatic generation of a unique self-signed WebUI certificate and private key when `webui.tls_certificate_path` and `webui.tls_private_key_path` are left empty
 
 ## Validation Results
 Validated successfully with:
@@ -119,7 +121,10 @@ Linux-host validation on `192.168.200.120` used:
 - Linux OpenSSL `3.0.2` does not support `ML-DSA-87`, so `config.toml` was adjusted to `key_type = "rsa2048"` for Linux-hosted `serverkeygen` validation
 - QA EST endpoint remains on port `8443`
 - QA WebUI endpoint is on port `9443`
-- Current QA WebUI access succeeds over `http://192.168.200.120:9443`
+- WebUI now serves HTTPS only on port `9443`
+- When no WebUI certificate is configured, runtime generates:
+  - `logs/webui-tls/webui-self-signed.crt`
+  - `logs/webui-tls/webui-self-signed.key`
 - QA service restarts must use `sudo systemctl restart est-server`
 
 ## Generated Configuration Snapshot
@@ -232,6 +237,7 @@ ml_dsa_supported = false
 - Leaf certificate assignments are now stored in certificate-store metadata JSON and can be toggled directly in the WebUI with checkbox controls for:
   - EST Server
   - WebUI
+- Browser-based WebUI regression clients now default to HTTPS and ignore the expected self-signed certificate warning during automated QA
 
 ## Latest Validation
 - Local validation passed:
@@ -244,6 +250,9 @@ ml_dsa_supported = false
   - `cargo test`
   - `cargo clippy --all-targets -- -D warnings`
   - `node --check webui/static/app.js`
+  - `node --check scripts/webui-regression-test.cjs`
+  - `node --check scripts/browser-auth-switch-test.cjs`
+  - `node --check tests/browser-auth-switch.spec.js`
 - QA deployment completed on `192.168.200.120`:
   - synced workspace to `/home/krich/src/est-rust-server`
   - rebuilt release binary remotely

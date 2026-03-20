@@ -20,18 +20,36 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use openssl::{rand::rand_bytes, sha::sha256};
+use hyper::{body::Incoming, server::conn::http1};
+use hyper_util::{rt::TokioIo, service::TowerToHyperService};
+use openssl::{
+    asn1::{Asn1Integer, Asn1Time},
+    bn::BigNum,
+    ec::{EcGroup, EcKey},
+    hash::MessageDigest,
+    nid::Nid,
+    pkey::PKey,
+    rand::rand_bytes,
+    sha::sha256,
+    ssl::{Ssl, SslAcceptor, SslFiletype, SslMethod, SslVersion},
+    x509::{
+        extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
+        X509NameBuilder, X509,
+    },
+};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    pin::Pin,
     process::Command,
     sync::{Arc, RwLock},
 };
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio_openssl::SslStream;
 use tracing::{error, info, warn};
 
 use self::cert_store::{
@@ -47,6 +65,8 @@ use crate::est::{
 
 const BASIC_AUTH_CHALLENGE: &str = r#"Basic realm="EST WebUI""#;
 const LOGOUT_MARKER_COOKIE_NAME: &str = "est_webui_logout_nonce";
+const WEBUI_SELF_SIGNED_CERT_PATH: &str = "logs/webui-tls/webui-self-signed.crt";
+const WEBUI_SELF_SIGNED_KEY_PATH: &str = "logs/webui-tls/webui-self-signed.key";
 
 #[derive(RustEmbed)]
 #[folder = "webui/static/"]
@@ -57,6 +77,13 @@ pub struct WebUiState {
     pub certificate_store_path: PathBuf,
     pub config: RwLock<ServerConfig>,
     pub logout_markers: RwLock<HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone)]
+struct WebUiTlsMaterial {
+    certificate_path: PathBuf,
+    private_key_path: PathBuf,
+    generated_self_signed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -278,10 +305,257 @@ pub async fn run_webui(config_path: PathBuf, config: ServerConfig) -> Result<()>
     );
     let socket_addr: SocketAddr = bind_address.parse()?;
     let listener = TcpListener::bind(socket_addr).await?;
+    let tls_material = resolve_webui_tls_material(&config)?;
+    let acceptor = Arc::new(build_webui_ssl_acceptor(&config, &tls_material)?);
 
-    info!("WebUI listener started on http://{bind_address}");
+    if tls_material.generated_self_signed {
+        info!(
+            "WebUI generated a unique self-signed HTTPS certificate at `{}` with key `{}`",
+            tls_material.certificate_path.display(),
+            tls_material.private_key_path.display()
+        );
+    }
 
-    axum::serve(listener, app).await?;
+    info!("WebUI listener started on https://{bind_address}");
+
+    loop {
+        let (stream, remote_address) = listener.accept().await?;
+        let acceptor = Arc::clone(&acceptor);
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            if let Err(error) = serve_webui_connection(stream, acceptor, app).await {
+                error!("WebUI connection from {remote_address} failed: {error:#}");
+            }
+        });
+    }
+}
+
+fn resolve_webui_tls_material(config: &ServerConfig) -> Result<WebUiTlsMaterial> {
+    let certificate_path = config.webui.tls_certificate_path.trim();
+    let private_key_path = config.webui.tls_private_key_path.trim();
+
+    if !certificate_path.is_empty() || !private_key_path.is_empty() {
+        if certificate_path.is_empty() || private_key_path.is_empty() {
+            anyhow::bail!(
+                "webui.tls_certificate_path and webui.tls_private_key_path must either both be set or both be empty"
+            );
+        }
+
+        return Ok(WebUiTlsMaterial {
+            certificate_path: PathBuf::from(certificate_path),
+            private_key_path: PathBuf::from(private_key_path),
+            generated_self_signed: false,
+        });
+    }
+
+    generate_self_signed_webui_certificate(config)
+}
+
+fn generate_self_signed_webui_certificate(config: &ServerConfig) -> Result<WebUiTlsMaterial> {
+    let certificate_path = PathBuf::from(WEBUI_SELF_SIGNED_CERT_PATH);
+    let private_key_path = PathBuf::from(WEBUI_SELF_SIGNED_KEY_PATH);
+
+    if let Some(parent) = certificate_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create WebUI TLS directory `{}`",
+                parent.display()
+            )
+        })?;
+    }
+
+    let group =
+        EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).context("failed to create P-256 group")?;
+    let ec_key = EcKey::generate(&group).context("failed to generate WebUI EC private key")?;
+    let private_key =
+        PKey::from_ec_key(ec_key).context("failed to convert WebUI EC key to PKey")?;
+
+    let mut name_builder =
+        X509NameBuilder::new().context("failed to create WebUI certificate subject")?;
+    name_builder
+        .append_entry_by_nid(Nid::COMMONNAME, "EST WebUI Self-Signed")
+        .context("failed to set WebUI certificate common name")?;
+    let subject_name = name_builder.build();
+
+    let mut serial_bytes = [0_u8; 16];
+    rand_bytes(&mut serial_bytes).context("failed to generate WebUI certificate serial")?;
+    serial_bytes[0] &= 0x7f;
+    let serial_bn =
+        BigNum::from_slice(&serial_bytes).context("failed to create WebUI serial number")?;
+    let serial =
+        Asn1Integer::from_bn(&serial_bn).context("failed to encode WebUI serial number")?;
+
+    let mut builder = X509::builder().context("failed to create WebUI certificate builder")?;
+    builder
+        .set_version(2)
+        .context("failed to set WebUI certificate version")?;
+    builder
+        .set_serial_number(&serial)
+        .context("failed to set WebUI certificate serial")?;
+    builder
+        .set_subject_name(&subject_name)
+        .context("failed to set WebUI certificate subject")?;
+    builder
+        .set_issuer_name(&subject_name)
+        .context("failed to set WebUI certificate issuer")?;
+    builder
+        .set_pubkey(&private_key)
+        .context("failed to set WebUI certificate public key")?;
+
+    let not_before =
+        Asn1Time::days_from_now(0).context("failed to create WebUI certificate notBefore")?;
+    let not_after =
+        Asn1Time::days_from_now(365).context("failed to create WebUI certificate notAfter")?;
+    builder
+        .set_not_before(&not_before)
+        .context("failed to set WebUI certificate notBefore")?;
+    builder
+        .set_not_after(&not_after)
+        .context("failed to set WebUI certificate notAfter")?;
+
+    let basic_constraints = BasicConstraints::new()
+        .build()
+        .context("failed to create WebUI basic constraints")?;
+    let key_usage = KeyUsage::new()
+        .digital_signature()
+        .key_encipherment()
+        .build()
+        .context("failed to create WebUI key usage")?;
+    let extended_key_usage = ExtendedKeyUsage::new()
+        .server_auth()
+        .build()
+        .context("failed to create WebUI extended key usage")?;
+
+    builder
+        .append_extension(basic_constraints)
+        .context("failed to append WebUI basic constraints")?;
+    builder
+        .append_extension(key_usage)
+        .context("failed to append WebUI key usage")?;
+    builder
+        .append_extension(extended_key_usage)
+        .context("failed to append WebUI extended key usage")?;
+
+    let mut subject_alt_name = SubjectAlternativeName::new();
+    subject_alt_name.dns("localhost").ip("127.0.0.1").ip("::1");
+
+    let listen_address = config.webui.listen_address.trim();
+    if !listen_address.is_empty() && !matches!(listen_address, "0.0.0.0" | "::" | "[::]") {
+        if let Ok(ip_address) = listen_address.parse::<IpAddr>() {
+            subject_alt_name.ip(&ip_address.to_string());
+        } else {
+            subject_alt_name.dns(listen_address);
+        }
+    }
+
+    let subject_alt_name = subject_alt_name
+        .build(&builder.x509v3_context(None, None))
+        .context("failed to create WebUI subjectAltName extension")?;
+    builder
+        .append_extension(subject_alt_name)
+        .context("failed to append WebUI subjectAltName extension")?;
+
+    builder
+        .sign(&private_key, MessageDigest::sha256())
+        .context("failed to sign WebUI self-signed certificate")?;
+
+    fs::write(
+        &certificate_path,
+        builder
+            .build()
+            .to_pem()
+            .context("failed to serialize WebUI certificate as PEM")?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write WebUI self-signed certificate `{}`",
+            certificate_path.display()
+        )
+    })?;
+    fs::write(
+        &private_key_path,
+        private_key
+            .private_key_to_pem_pkcs8()
+            .context("failed to serialize WebUI private key as PEM")?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write WebUI private key `{}`",
+            private_key_path.display()
+        )
+    })?;
+
+    Ok(WebUiTlsMaterial {
+        certificate_path,
+        private_key_path,
+        generated_self_signed: true,
+    })
+}
+
+fn build_webui_ssl_acceptor(
+    config: &ServerConfig,
+    tls_material: &WebUiTlsMaterial,
+) -> Result<SslAcceptor> {
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())
+        .context("failed to build WebUI SSL acceptor")?;
+
+    builder
+        .set_certificate_file(&tls_material.certificate_path, SslFiletype::PEM)
+        .with_context(|| {
+            format!(
+                "failed to load WebUI TLS certificate `{}`",
+                tls_material.certificate_path.display()
+            )
+        })?;
+    builder
+        .set_private_key_file(&tls_material.private_key_path, SslFiletype::PEM)
+        .with_context(|| {
+            format!(
+                "failed to load WebUI TLS private key `{}`",
+                tls_material.private_key_path.display()
+            )
+        })?;
+    builder
+        .check_private_key()
+        .context("WebUI TLS private key did not match the configured certificate")?;
+    builder
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .context("failed to set WebUI minimum TLS version")?;
+    builder
+        .set_max_proto_version(Some(SslVersion::TLS1_3))
+        .context("failed to set WebUI maximum TLS version")?;
+    builder
+        .set_ciphersuites(&config.preferred_tls_cipher_suite)
+        .with_context(|| {
+            format!(
+                "failed to set WebUI TLS 1.3 cipher suite `{}`",
+                config.preferred_tls_cipher_suite
+            )
+        })?;
+
+    Ok(builder.build())
+}
+
+async fn serve_webui_connection(
+    stream: TcpStream,
+    acceptor: Arc<SslAcceptor>,
+    app: Router,
+) -> Result<()> {
+    let ssl = Ssl::new(acceptor.context()).context("failed to create WebUI SSL connection")?;
+    let mut tls_stream =
+        SslStream::new(ssl, stream).context("failed to wrap WebUI TCP stream in TLS")?;
+    Pin::new(&mut tls_stream)
+        .accept()
+        .await
+        .context("WebUI TLS handshake failed")?;
+
+    let service = TowerToHyperService::new(app.into_service::<Incoming>());
+
+    http1::Builder::new()
+        .serve_connection(TokioIo::new(tls_stream), service)
+        .await
+        .context("WebUI HTTP/1.1 service failed")?;
 
     Ok(())
 }
@@ -1419,11 +1693,13 @@ fn generate_logout_marker() -> Result<String, WebUiError> {
 }
 
 fn build_logout_marker_cookie(marker: &str) -> String {
-    format!("{LOGOUT_MARKER_COOKIE_NAME}={marker}; Path=/; HttpOnly; SameSite=Strict; Max-Age=600")
+    format!(
+        "{LOGOUT_MARKER_COOKIE_NAME}={marker}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=600"
+    )
 }
 
 fn expire_logout_marker_cookie() -> String {
-    format!("{LOGOUT_MARKER_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+    format!("{LOGOUT_MARKER_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0")
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
