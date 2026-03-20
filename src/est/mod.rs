@@ -39,7 +39,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_openssl::SslStream;
 use tracing::{error, info};
 
-const DEFAULT_OPENSSL_DIR: &str = "/opt/homebrew/opt/openssl@3.5";
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_TLS_VERSION: &str = "TLS1.3";
 const DEFAULT_TLS_CIPHER_SUITE: &str = "TLS_AES_256_GCM_SHA384";
@@ -188,6 +187,7 @@ pub struct ServerConfig {
     pub enable_fips: bool,
     pub openssl_dir: String,
     pub openssl_binary: String,
+    pub openssl_providers: Vec<String>,
     pub ca_certificate_path: String,
     pub ca_private_key_path: String,
     pub client_auth_ca_certificate_path: String,
@@ -212,8 +212,9 @@ impl Default for ServerConfig {
             preferred_tls_cipher_suite: DEFAULT_TLS_CIPHER_SUITE.to_owned(),
             key_type: DEFAULT_KEY_TYPE.to_owned(),
             enable_fips: false,
-            openssl_dir: DEFAULT_OPENSSL_DIR.to_owned(),
+            openssl_dir: String::new(),
             openssl_binary: String::new(),
+            openssl_providers: Vec::new(),
             ca_certificate_path: DEFAULT_CA_CERTIFICATE_PATH.to_owned(),
             ca_private_key_path: DEFAULT_CA_PRIVATE_KEY_PATH.to_owned(),
             client_auth_ca_certificate_path: DEFAULT_CLIENT_AUTH_CA_CERTIFICATE_PATH.to_owned(),
@@ -241,6 +242,7 @@ pub struct ServerConfigOverrides {
     pub enable_fips: Option<bool>,
     pub openssl_dir: Option<String>,
     pub openssl_binary: Option<String>,
+    pub openssl_providers: Option<Vec<String>>,
     pub ca_certificate_path: Option<String>,
     pub ca_private_key_path: Option<String>,
     pub client_auth_ca_certificate_path: Option<String>,
@@ -273,6 +275,7 @@ struct ConnectionMeta {
 struct EstState {
     config: ServerConfig,
     openssl_binary: String,
+    openssl_providers: Vec<String>,
     ca_certificate: X509,
     ca_private_key: PKey<Private>,
     ca_certificate_path: PathBuf,
@@ -436,6 +439,9 @@ fn apply_overrides(config: &mut ServerConfig, overrides: &ServerConfigOverrides)
     if let Some(value) = &overrides.openssl_binary {
         config.openssl_binary.clone_from(value);
     }
+    if let Some(value) = &overrides.openssl_providers {
+        config.openssl_providers = value.clone();
+    }
     if let Some(value) = &overrides.ca_certificate_path {
         config.ca_certificate_path.clone_from(value);
     }
@@ -511,6 +517,8 @@ fn normalize_server_config(config: &mut ServerConfig) {
     if config.key_type.trim().is_empty() {
         config.key_type = DEFAULT_KEY_TYPE.to_owned();
     }
+    config.openssl_providers = effective_openssl_providers(config);
+
     if config.ca_certificate_path.trim().is_empty() {
         config.ca_certificate_path = DEFAULT_CA_CERTIFICATE_PATH.to_owned();
     }
@@ -645,7 +653,8 @@ fn validate_server_config(config: &ServerConfig) -> Result<()> {
 }
 
 fn load_state(config: ServerConfig) -> Result<EstState> {
-    let openssl_binary = detect_openssl_binary(&config);
+    let openssl_binary = resolve_openssl_binary(&config);
+    let openssl_providers = effective_openssl_providers(&config);
     let ca_certificate_path = PathBuf::from(&config.ca_certificate_path);
     let ca_private_key_path = PathBuf::from(&config.ca_private_key_path);
     let client_auth_ca_certificate_path = PathBuf::from(&config.client_auth_ca_certificate_path);
@@ -667,6 +676,7 @@ fn load_state(config: ServerConfig) -> Result<EstState> {
     Ok(EstState {
         config,
         openssl_binary,
+        openssl_providers,
         ca_certificate,
         ca_private_key,
         ca_certificate_path,
@@ -676,33 +686,159 @@ fn load_state(config: ServerConfig) -> Result<EstState> {
     })
 }
 
-fn detect_openssl_binary(config: &ServerConfig) -> String {
-    if let Ok(value) = env::var("OPENSSL") {
-        let path = Path::new(&value);
-        if !value.is_empty() && (!path.is_absolute() || path.exists()) {
-            return value;
-        }
-    }
-
-    if !config.openssl_binary.is_empty() {
+pub(crate) fn resolve_openssl_binary(config: &ServerConfig) -> String {
+    if !config.openssl_binary.trim().is_empty() {
         let configured = Path::new(&config.openssl_binary);
         if !configured.is_absolute() || configured.exists() {
             return config.openssl_binary.clone();
         }
     }
 
-    let openssl_dir = if config.openssl_dir.is_empty() {
-        DEFAULT_OPENSSL_DIR.to_owned()
-    } else {
-        config.openssl_dir.clone()
-    };
+    discover_openssl_binaries(config)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "openssl".to_owned())
+}
 
-    let candidate = Path::new(&openssl_dir).join("bin").join("openssl");
-    if candidate.exists() {
-        return candidate.to_string_lossy().into_owned();
+pub(crate) fn effective_openssl_providers(config: &ServerConfig) -> Vec<String> {
+    let mut providers = Vec::new();
+
+    for provider in &config.openssl_providers {
+        let trimmed = provider.trim();
+        if !trimmed.is_empty() && !providers.iter().any(|entry| entry == trimmed) {
+            providers.push(trimmed.to_owned());
+        }
     }
 
-    "openssl".to_owned()
+    providers
+}
+
+pub(crate) fn discover_openssl_binaries(config: &ServerConfig) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    push_openssl_candidate(&mut candidates, &config.openssl_binary);
+
+    if let Ok(value) = env::var("OPENSSL") {
+        push_openssl_candidate(&mut candidates, &value);
+    }
+
+    if !config.openssl_dir.trim().is_empty() {
+        let candidate = Path::new(&config.openssl_dir).join("bin").join("openssl");
+        if candidate.exists() {
+            push_openssl_candidate(&mut candidates, candidate.to_string_lossy().as_ref());
+        }
+    }
+
+    let path_entries = env::var_os("PATH")
+        .map(|value| env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    for path in path_entries {
+        let candidate = path.join("openssl");
+        if candidate.exists() {
+            push_openssl_candidate(&mut candidates, candidate.to_string_lossy().as_ref());
+        }
+    }
+
+    if candidates.is_empty() {
+        candidates.push("openssl".to_owned());
+    }
+
+    candidates
+}
+
+pub(crate) fn query_openssl_version(binary: &str) -> Result<String> {
+    let output = Command::new(binary)
+        .arg("version")
+        .output()
+        .with_context(|| format!("failed to execute `{binary} version`"))?;
+
+    if !output.status.success() {
+        bail!(
+            "`{binary} version` failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    String::from_utf8(output.stdout)
+        .with_context(|| format!("`{binary} version` output was not valid UTF-8"))
+        .map(|value| value.trim().to_owned())
+}
+
+pub(crate) fn query_openssl_providers(binary: &str) -> Result<Vec<String>> {
+    let output = Command::new(binary)
+        .args(["list", "-providers"])
+        .output()
+        .with_context(|| format!("failed to execute `{binary} list -providers`"))?;
+
+    if !output.status.success() {
+        bail!(
+            "`{binary} list -providers` failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("`{binary} list -providers` output was not valid UTF-8"))?;
+
+    Ok(parse_provider_names(&stdout))
+}
+
+pub(crate) fn openssl_supports_provider_flag(binary: &str) -> bool {
+    query_openssl_version(binary)
+        .ok()
+        .and_then(|version| parse_openssl_version_triplet(&version))
+        .is_some_and(|(major, minor, _patch)| (major, minor) >= (3, 2))
+}
+
+fn push_openssl_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() && !path.exists() {
+        return;
+    }
+
+    if !candidates.iter().any(|entry| entry == trimmed) {
+        candidates.push(trimmed.to_owned());
+    }
+}
+
+fn parse_provider_names(output: &str) -> Vec<String> {
+    let mut providers = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("Providers:") || trimmed.contains(':')
+        {
+            continue;
+        }
+
+        if !providers.iter().any(|entry| entry == trimmed) {
+            providers.push(trimmed.to_owned());
+        }
+    }
+
+    providers
+}
+
+fn parse_openssl_version_triplet(version: &str) -> Option<(u32, u32, u32)> {
+    let version_token = version.split_whitespace().nth(1)?;
+    let numeric_part = version_token
+        .split(|character: char| !character.is_ascii_digit() && character != '.')
+        .next()?;
+    let mut components = numeric_part.split('.');
+
+    let major = components.next()?.parse().ok()?;
+    let minor = components.next()?.parse().ok()?;
+    let patch = components.next()?.parse().ok()?;
+
+    Some((major, minor, patch))
 }
 
 fn build_ssl_acceptor(state: &EstState) -> Result<SslAcceptor> {
@@ -917,7 +1053,11 @@ fn require_content_type(request: &Request<Incoming>, expected: &str) -> Result<(
 }
 
 async fn handle_cacerts(state: &EstState) -> Result<Response<Body>> {
-    let pkcs7 = build_certs_only_pkcs7(&state.openssl_binary, &[&state.ca_certificate_path])?;
+    let pkcs7 = build_certs_only_pkcs7(
+        &state.openssl_binary,
+        &state.openssl_providers,
+        &[&state.ca_certificate_path],
+    )?;
     Ok(pkcs7_response(pkcs7))
 }
 
@@ -959,11 +1099,17 @@ async fn handle_simple_enroll(
                 "peer certificate is required for reenrollment",
             )
         })?;
-        ensure_same_subject_and_alt_name(&state.openssl_binary, &request, peer_certificate)?;
+        ensure_same_subject_and_alt_name(
+            &state.openssl_binary,
+            &state.openssl_providers,
+            &request,
+            peer_certificate,
+        )?;
     }
 
     let context = build_enrollment_request_context(
         &state.openssl_binary,
+        &state.openssl_providers,
         operation,
         body,
         &request,
@@ -1013,6 +1159,7 @@ async fn handle_simple_enroll(
             EnrollmentAction::Manual => {
                 persist_pending_enrollment(
                     &state.openssl_binary,
+                    &state.openssl_providers,
                     pending_dir,
                     &context,
                     &decision,
@@ -1027,6 +1174,7 @@ async fn handle_simple_enroll(
             EnrollmentAction::Auto if prefer_async => {
                 persist_pending_enrollment(
                     &state.openssl_binary,
+                    &state.openssl_providers,
                     pending_dir,
                     &context,
                     &decision,
@@ -1060,6 +1208,7 @@ async fn handle_simple_enroll(
     )?;
     validate_persisted_artifacts_for_csr(
         &state.openssl_binary,
+        &state.openssl_providers,
         &stored_csr_path,
         &stored_cert_path,
         &state.ca_certificate_path,
@@ -1068,6 +1217,7 @@ async fn handle_simple_enroll(
     let temp_cert_path = write_temp_file("est-issued", "crt", &issued_certificate_pem)?;
     let result = build_certs_only_pkcs7(
         &state.openssl_binary,
+        &state.openssl_providers,
         &[&temp_cert_path, &state.ca_certificate_path],
     );
     cleanup_temp_file(&temp_cert_path);
@@ -1102,6 +1252,7 @@ async fn handle_server_keygen(
 
     let context = build_enrollment_request_context(
         &state.openssl_binary,
+        &state.openssl_providers,
         operation,
         body,
         &request,
@@ -1151,6 +1302,7 @@ async fn handle_server_keygen(
             EnrollmentAction::Manual => {
                 persist_pending_enrollment(
                     &state.openssl_binary,
+                    &state.openssl_providers,
                     pending_dir,
                     &context,
                     &decision,
@@ -1165,6 +1317,7 @@ async fn handle_server_keygen(
             EnrollmentAction::Auto if prefer_async => {
                 persist_pending_enrollment(
                     &state.openssl_binary,
+                    &state.openssl_providers,
                     pending_dir,
                     &context,
                     &decision,
@@ -1180,7 +1333,11 @@ async fn handle_server_keygen(
         }
     }
 
-    let private_key_path = generate_server_key(&state.openssl_binary, &state.config.key_type)?;
+    let private_key_path = generate_server_key(
+        &state.openssl_binary,
+        &state.openssl_providers,
+        &state.config.key_type,
+    )?;
     let private_key_pem = fs::read(&private_key_path).with_context(|| {
         format!(
             "failed to read generated key `{}`",
@@ -1208,6 +1365,7 @@ async fn handle_server_keygen(
     )?;
     validate_persisted_artifacts_for_private_key(
         &state.openssl_binary,
+        &state.openssl_providers,
         &stored_csr_path,
         &stored_cert_path,
         &state.ca_certificate_path,
@@ -1217,6 +1375,7 @@ async fn handle_server_keygen(
     let cert_path = write_temp_file("est-serverkeygen-cert", "crt", &issued_certificate_pem)?;
     let pkcs7_cert = build_certs_only_pkcs7(
         &state.openssl_binary,
+        &state.openssl_providers,
         &[&cert_path, &state.ca_certificate_path],
     )?;
 
@@ -1230,6 +1389,7 @@ async fn handle_server_keygen(
         write_temp_file("est-serverkeygen-peer", "crt", &peer_certificate.to_pem()?)?;
     let encrypted_key = encrypt_private_key_for_recipient(
         &state.openssl_binary,
+        &state.openssl_providers,
         &private_key_path,
         &peer_certificate_path,
     )?;
@@ -1277,6 +1437,7 @@ fn ensure_pkcs10_request(body: &[u8]) -> Result<()> {
 
 fn ensure_same_subject_and_alt_name(
     openssl_binary: &str,
+    openssl_providers: &[String],
     request: &X509Req,
     peer_certificate: &X509,
 ) -> Result<()> {
@@ -1297,8 +1458,13 @@ fn ensure_same_subject_and_alt_name(
         .into());
     }
 
-    let request_sans = extract_subject_alt_names_from_csr(openssl_binary, request)?;
-    let peer_sans = extract_subject_alt_names_from_certificate(openssl_binary, peer_certificate)?;
+    let request_sans =
+        extract_subject_alt_names_from_csr(openssl_binary, openssl_providers, request)?;
+    let peer_sans = extract_subject_alt_names_from_certificate(
+        openssl_binary,
+        openssl_providers,
+        peer_certificate,
+    )?;
 
     if request_sans != peer_sans {
         return Err(HttpStatusError::new(
@@ -1313,6 +1479,7 @@ fn ensure_same_subject_and_alt_name(
 
 fn build_enrollment_request_context(
     openssl_binary: &str,
+    openssl_providers: &[String],
     operation: &str,
     body: &[u8],
     request: &X509Req,
@@ -1323,7 +1490,8 @@ fn build_enrollment_request_context(
     let subject_ou = first_subject_entry(request.subject_name(), Nid::ORGANIZATIONALUNITNAME)?;
     let subject_o = first_subject_entry(request.subject_name(), Nid::ORGANIZATIONNAME)?;
 
-    let san_entries = extract_subject_alt_names_from_csr(openssl_binary, request)?;
+    let san_entries =
+        extract_subject_alt_names_from_csr(openssl_binary, openssl_providers, request)?;
     let san_dns = san_entries
         .iter()
         .filter_map(|value| value.strip_prefix("DNS:").map(ToOwned::to_owned))
@@ -1479,6 +1647,7 @@ fn pending_record_path(
 
 fn persist_pending_enrollment(
     openssl_binary: &str,
+    openssl_providers: &[String],
     pending_enrollment_dir: &Path,
     context: &EnrollmentRequestContext,
     decision: &EnrollmentDecision,
@@ -1499,7 +1668,7 @@ fn persist_pending_enrollment(
     let csr_path = pending_dir.join("request.csr.der");
     fs::write(&csr_path, body)
         .with_context(|| format!("failed to write pending CSR `{}`", csr_path.display()))?;
-    validate_stored_csr(openssl_binary, &csr_path)?;
+    validate_stored_csr(openssl_binary, openssl_providers, &csr_path)?;
 
     let record = PendingEnrollmentRecord {
         operation: context.operation.clone(),
@@ -1767,9 +1936,15 @@ where
     Ok(builder.build())
 }
 
-fn build_certs_only_pkcs7(openssl_binary: &str, certificate_paths: &[&Path]) -> Result<Vec<u8>> {
+fn build_certs_only_pkcs7(
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    certificate_paths: &[&Path],
+) -> Result<Vec<u8>> {
     let mut command = Command::new(openssl_binary);
-    command.arg("crl2pkcs7").arg("-nocrl");
+    command.arg("crl2pkcs7");
+    append_openssl_provider_args(&mut command, openssl_binary, openssl_providers);
+    command.arg("-nocrl");
 
     for path in certificate_paths {
         command.arg("-certfile").arg(path);
@@ -1794,13 +1969,16 @@ fn build_certs_only_pkcs7(openssl_binary: &str, certificate_paths: &[&Path]) -> 
 
 fn encrypt_private_key_for_recipient(
     openssl_binary: &str,
+    openssl_providers: &[String],
     private_key_path: &Path,
     recipient_certificate_path: &Path,
 ) -> Result<Vec<u8>> {
     let output_path = write_temp_file("est-serverkeygen-encrypted", "der", &[])?;
-    let output = Command::new(openssl_binary)
+    let mut command = Command::new(openssl_binary);
+    command.arg("cms");
+    append_openssl_provider_args(&mut command, openssl_binary, openssl_providers);
+    let output = command
         .args([
-            "cms",
             "-encrypt",
             "-binary",
             "-outform",
@@ -1831,10 +2009,15 @@ fn encrypt_private_key_for_recipient(
     Ok(encrypted)
 }
 
-fn generate_server_key(openssl_binary: &str, key_type: &str) -> Result<PathBuf> {
+fn generate_server_key(
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    key_type: &str,
+) -> Result<PathBuf> {
     let output_path = temp_path("est-serverkeygen-key", "pem");
     let mut command = Command::new(openssl_binary);
     command.arg("genpkey");
+    append_openssl_provider_args(&mut command, openssl_binary, openssl_providers);
 
     match key_type {
         "rsa2048" => {
@@ -1946,14 +2129,21 @@ fn persist_enrollment_artifacts(
 
 fn validate_persisted_artifacts_for_csr(
     openssl_binary: &str,
+    openssl_providers: &[String],
     csr_path: &Path,
     cert_path: &Path,
     ca_certificate_path: &Path,
 ) -> Result<()> {
-    validate_stored_csr(openssl_binary, csr_path)?;
-    validate_stored_certificate(openssl_binary, cert_path, ca_certificate_path)?;
-    let csr_public_key = extract_public_key_from_csr(openssl_binary, csr_path)?;
-    let cert_public_key = extract_public_key_from_certificate(openssl_binary, cert_path)?;
+    validate_stored_csr(openssl_binary, openssl_providers, csr_path)?;
+    validate_stored_certificate(
+        openssl_binary,
+        openssl_providers,
+        cert_path,
+        ca_certificate_path,
+    )?;
+    let csr_public_key = extract_public_key_from_csr(openssl_binary, openssl_providers, csr_path)?;
+    let cert_public_key =
+        extract_public_key_from_certificate(openssl_binary, openssl_providers, cert_path)?;
     if csr_public_key != cert_public_key {
         bail!(
             "issued certificate `{}` does not match stored CSR public key `{}`",
@@ -1967,16 +2157,23 @@ fn validate_persisted_artifacts_for_csr(
 
 fn validate_persisted_artifacts_for_private_key(
     openssl_binary: &str,
+    openssl_providers: &[String],
     csr_path: &Path,
     cert_path: &Path,
     ca_certificate_path: &Path,
     private_key_path: &Path,
 ) -> Result<()> {
-    validate_stored_csr(openssl_binary, csr_path)?;
-    validate_stored_certificate(openssl_binary, cert_path, ca_certificate_path)?;
-    let cert_public_key = extract_public_key_from_certificate(openssl_binary, cert_path)?;
+    validate_stored_csr(openssl_binary, openssl_providers, csr_path)?;
+    validate_stored_certificate(
+        openssl_binary,
+        openssl_providers,
+        cert_path,
+        ca_certificate_path,
+    )?;
+    let cert_public_key =
+        extract_public_key_from_certificate(openssl_binary, openssl_providers, cert_path)?;
     let private_key_public_key =
-        extract_public_key_from_private_key(openssl_binary, private_key_path)?;
+        extract_public_key_from_private_key(openssl_binary, openssl_providers, private_key_path)?;
     if cert_public_key != private_key_public_key {
         bail!(
             "issued certificate `{}` does not match generated private key `{}`",
@@ -1988,9 +2185,14 @@ fn validate_persisted_artifacts_for_private_key(
     Ok(())
 }
 
-fn validate_stored_csr(openssl_binary: &str, csr_path: &Path) -> Result<()> {
+fn validate_stored_csr(
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    csr_path: &Path,
+) -> Result<()> {
     run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "req",
             "-inform",
@@ -2008,11 +2210,13 @@ fn validate_stored_csr(openssl_binary: &str, csr_path: &Path) -> Result<()> {
 
 fn validate_stored_certificate(
     openssl_binary: &str,
+    openssl_providers: &[String],
     cert_path: &Path,
     ca_certificate_path: &Path,
 ) -> Result<()> {
     run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "x509",
             "-in",
@@ -2031,6 +2235,7 @@ fn validate_stored_certificate(
 
     run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "verify",
             "-CAfile",
@@ -2048,9 +2253,14 @@ fn validate_stored_certificate(
     Ok(())
 }
 
-fn extract_public_key_from_csr(openssl_binary: &str, csr_path: &Path) -> Result<String> {
+fn extract_public_key_from_csr(
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    csr_path: &Path,
+) -> Result<String> {
     run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "req",
             "-inform",
@@ -2069,9 +2279,14 @@ fn extract_public_key_from_csr(openssl_binary: &str, csr_path: &Path) -> Result<
     })
 }
 
-fn extract_public_key_from_certificate(openssl_binary: &str, cert_path: &Path) -> Result<String> {
+fn extract_public_key_from_certificate(
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    cert_path: &Path,
+) -> Result<String> {
     run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "x509",
             "-in",
@@ -2088,9 +2303,14 @@ fn extract_public_key_from_certificate(openssl_binary: &str, cert_path: &Path) -
     })
 }
 
-fn extract_public_key_from_private_key(openssl_binary: &str, key_path: &Path) -> Result<String> {
+fn extract_public_key_from_private_key(
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    key_path: &Path,
+) -> Result<String> {
     run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "pkey",
             "-in",
@@ -2110,11 +2330,13 @@ fn extract_public_key_from_private_key(openssl_binary: &str, key_path: &Path) ->
 
 fn extract_subject_alt_names_from_csr(
     openssl_binary: &str,
+    openssl_providers: &[String],
     request: &X509Req,
 ) -> Result<BTreeSet<String>> {
     let request_path = write_temp_file("est-reenroll-request", "pem", &request.to_pem()?)?;
     let output = run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "req",
             "-in",
@@ -2131,6 +2353,7 @@ fn extract_subject_alt_names_from_csr(
 
 fn extract_subject_alt_names_from_certificate(
     openssl_binary: &str,
+    openssl_providers: &[String],
     certificate: &X509,
 ) -> Result<BTreeSet<String>> {
     let certificate_path = write_temp_file(
@@ -2140,6 +2363,7 @@ fn extract_subject_alt_names_from_certificate(
     )?;
     let output = run_command(
         openssl_binary,
+        openssl_providers,
         &[
             "x509",
             "-in",
@@ -2329,9 +2553,32 @@ fn error_response(status: StatusCode, message: &str, retry_after: Option<u32>) -
     response
 }
 
-fn run_command(binary: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(binary)
-        .args(args)
+pub(crate) fn append_openssl_provider_args(
+    command: &mut Command,
+    binary: &str,
+    providers: &[String],
+) {
+    if !openssl_supports_provider_flag(binary) {
+        return;
+    }
+
+    for provider in providers {
+        command.arg("-provider").arg(provider);
+    }
+}
+
+fn run_command(binary: &str, providers: &[String], args: &[&str]) -> Result<String> {
+    if args.is_empty() {
+        bail!("no openssl command arguments were provided");
+    }
+
+    let mut command = Command::new(binary);
+    command.arg(args[0]);
+    append_openssl_provider_args(&mut command, binary, providers);
+    if args.len() > 1 {
+        command.args(&args[1..]);
+    }
+    let output = command
         .output()
         .with_context(|| format!("failed to execute `{binary}`"))?;
 

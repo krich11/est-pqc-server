@@ -41,6 +41,7 @@ const state = {
   currentUser: null,
   users: [],
   config: null,
+  opensslPlatform: null,
   rules: null,
   pendingEnrollments: [],
   enrollmentHistory: [],
@@ -86,6 +87,8 @@ const configModeButtons = document.querySelectorAll("[data-config-mode]");
 const systemdActionButtons = document.querySelectorAll("[data-systemd-action]");
 const configInputs = document.querySelectorAll("[data-config-path]");
 const configCollapseButtons = document.querySelectorAll("[data-config-collapse]");
+const opensslBinarySelect = document.getElementById("config-openssl-binary-select");
+const opensslProvidersContainer = document.getElementById("config-openssl-providers");
 const trustedCaTableBody = document.getElementById("trusted-ca-table-body");
 const leafCertificatesTableBody = document.getElementById("leaf-certificates-table-body");
 const uploadTrustedCaForm = document.getElementById("upload-trusted-ca-form");
@@ -146,6 +149,8 @@ configModeButtons.forEach((button) => {
 configCollapseButtons.forEach((button) => {
   button.addEventListener("click", () => toggleConfigSection(button.dataset.configCollapse));
 });
+
+opensslBinarySelect?.addEventListener("change", handleOpenSslBinarySelectionChange);
 
 systemdActionButtons.forEach((button) => {
   button.addEventListener("click", () => void handleSystemdAction(button.dataset.systemdAction));
@@ -294,6 +299,18 @@ function applyPermissionState() {
     rulesDefaultAction.disabled = !canModifyPolicy();
   }
 
+  if (opensslBinarySelect) {
+    opensslBinarySelect.disabled = !canEditConfig();
+  }
+
+  if (opensslProvidersContainer) {
+    opensslProvidersContainer
+      .querySelectorAll('input[type="checkbox"]')
+      .forEach((input) => {
+        input.disabled = !canEditConfig();
+      });
+  }
+
   systemdActionButtons.forEach((button) => {
     button.disabled = !canManageSystemd();
   });
@@ -420,6 +437,8 @@ function updateConfigInputs() {
       input.value = value === null || value === undefined ? "" : String(value);
     }
   });
+
+  renderOpenSslPlatform();
 }
 
 function collectConfigPayload() {
@@ -445,6 +464,9 @@ function collectConfigPayload() {
 
     setValueByPath(payload, path, nextValue);
   });
+
+  payload.openssl_binary = opensslBinarySelect?.value || payload.openssl_binary || "";
+  payload.openssl_providers = collectSelectedOpenSslProviders();
 
   return payload;
 }
@@ -473,6 +495,7 @@ async function refreshConfig() {
 
   configOutput.textContent = JSON.stringify(config, null, 2);
   updateConfigInputs();
+  await refreshOpenSslPlatform();
   applyConfigMode();
   applyConfigSectionCollapseState();
 }
@@ -493,6 +516,7 @@ async function handleSaveConfig() {
     state.config = savedConfig;
     configOutput.textContent = JSON.stringify(savedConfig, null, 2);
     updateConfigInputs();
+    await refreshOpenSslPlatform();
     showMessage("Configuration saved.");
   } catch (error) {
     console.error(error);
@@ -516,6 +540,127 @@ function setConfigMode(mode) {
   state.configMode = mode === "text" ? "text" : "gui";
   localStorage.setItem(CONFIG_MODE_STORAGE_KEY, state.configMode);
   applyConfigMode();
+}
+
+function collectSelectedOpenSslProviders() {
+  if (!opensslProvidersContainer) {
+    return [];
+  }
+
+  return Array.from(opensslProvidersContainer.querySelectorAll('input[type="checkbox"]:checked'))
+    .map((input) => input.value)
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+function getSelectedOpenSslBinaryPath() {
+  if (!state.config) {
+    return "";
+  }
+
+  const configured = state.config.openssl_binary || "";
+  if (configured) {
+    return configured;
+  }
+
+  return state.opensslPlatform?.selected_binary || "";
+}
+
+function getSelectedOpenSslBinaryOption() {
+  const selectedPath = getSelectedOpenSslBinaryPath();
+  return state.opensslPlatform?.binaries?.find((binary) => binary.path === selectedPath) || null;
+}
+
+function handleOpenSslBinarySelectionChange() {
+  if (!state.config || !opensslBinarySelect) {
+    return;
+  }
+
+  state.config.openssl_binary = opensslBinarySelect.value || "";
+  renderOpenSslPlatform();
+}
+
+function renderOpenSslPlatform() {
+  if (!opensslBinarySelect || !opensslProvidersContainer) {
+    return;
+  }
+
+  const platform = state.opensslPlatform;
+  const binaries = platform?.binaries || [];
+  const selectedPath = getSelectedOpenSslBinaryPath();
+
+  opensslBinarySelect.innerHTML = "";
+
+  if (!binaries.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No OpenSSL binaries discovered";
+    opensslBinarySelect.append(option);
+    opensslBinarySelect.disabled = true;
+    opensslProvidersContainer.innerHTML = '<p class="muted">No providers available.</p>';
+    return;
+  }
+
+  binaries.forEach((binary) => {
+    const option = document.createElement("option");
+    option.value = binary.path;
+    option.textContent = binary.version ? `${binary.path} (${binary.version})` : binary.path;
+    option.selected = binary.path === selectedPath;
+    opensslBinarySelect.append(option);
+  });
+
+  opensslBinarySelect.disabled = !canEditConfig();
+
+  const selectedBinary = getSelectedOpenSslBinaryOption() || binaries[0];
+  if (state.config && selectedBinary && state.config.openssl_binary !== selectedBinary.path) {
+    state.config.openssl_binary = selectedBinary.path;
+  }
+
+  const availableProviders = selectedBinary?.providers || [];
+  const selectedProviders = new Set(
+    (state.config?.openssl_providers?.length
+      ? state.config.openssl_providers
+      : platform?.selected_providers || []
+    ).filter(Boolean)
+  );
+
+  const providerNames = Array.from(new Set([...availableProviders, ...selectedProviders])).sort();
+
+  if (!providerNames.length) {
+    opensslProvidersContainer.innerHTML = '<p class="muted">No providers reported for the selected OpenSSL binary.</p>';
+  } else {
+    opensslProvidersContainer.innerHTML = providerNames
+      .map(
+        (provider) => `
+          <label class="field checkbox-field">
+            <span>${escapeHtml(provider)}</span>
+            <input type="checkbox" value="${escapeAttribute(provider)}" ${
+              selectedProviders.has(provider) ? "checked" : ""
+            } ${canEditConfig() ? "" : "disabled"}>
+          </label>
+        `
+      )
+      .join("");
+
+    opensslProvidersContainer.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+      input.addEventListener("change", () => {
+        if (!state.config) {
+          return;
+        }
+        state.config.openssl_providers = collectSelectedOpenSslProviders();
+      });
+    });
+  }
+
+  if (state.config) {
+    state.config.openssl_providers = collectSelectedOpenSslProviders();
+  }
+
+}
+
+async function refreshOpenSslPlatform() {
+  const platform = await fetchJson("/api/platform/openssl");
+  state.opensslPlatform = platform;
+  renderOpenSslPlatform();
 }
 
 function applyConfigMode() {
@@ -1247,8 +1392,8 @@ function renderTrustedCaTable() {
     .map(
       (certificate) => `
         <tr>
+          <td>${escapeHtml(certificate.common_name || "—")}</td>
           <td>${escapeHtml(certificate.subject)}</td>
-          <td>${escapeHtml(certificate.issuer)}</td>
           <td>${escapeHtml(certificate.not_after)}</td>
           <td><code>${escapeHtml(truncateFingerprint(certificate.fingerprint))}</code></td>
           <td class="table-actions">
@@ -1277,7 +1422,7 @@ function renderLeafCertificatesTable() {
   if (!state.leafCertificates.length) {
     leafCertificatesTableBody.innerHTML = `
       <tr>
-        <td colspan="5" class="muted">No leaf certificates loaded.</td>
+        <td colspan="7" class="muted">No leaf certificates loaded.</td>
       </tr>
     `;
     return;
@@ -1287,10 +1432,12 @@ function renderLeafCertificatesTable() {
     .map(
       (certificate) => `
         <tr>
+          <td>${escapeHtml(certificate.common_name || "—")}</td>
           <td>${escapeHtml(certificate.subject)}</td>
           <td>${escapeHtml(certificate.issuer)}</td>
           <td>${escapeHtml(certificate.not_after)}</td>
           <td><code>${escapeHtml(truncateFingerprint(certificate.fingerprint))}</code></td>
+          <td>${renderLeafAssignmentControls(certificate)}</td>
           <td class="table-actions">
             <button class="secondary-button table-button" type="button" data-certificate-action="view-leaf" data-fingerprint="${escapeAttribute(certificate.fingerprint)}">
               View
@@ -1307,6 +1454,91 @@ function renderLeafCertificatesTable() {
   leafCertificatesTableBody.querySelectorAll("[data-certificate-action]").forEach((button) => {
     button.addEventListener("click", () => void handleCertificateAction(button));
   });
+
+  leafCertificatesTableBody.querySelectorAll("[data-leaf-assignment]").forEach((input) => {
+    input.addEventListener("change", () => void handleLeafAssignmentChange(input));
+  });
+}
+
+function renderLeafAssignmentControls(certificate) {
+  const assignedServices = new Set(certificate.assigned_services || []);
+  const disabled = canManageCertificates() ? "" : "disabled";
+
+  return `
+    <div class="assignment-checkboxes" data-assignment-group data-fingerprint="${escapeAttribute(certificate.fingerprint)}">
+      <label>
+        <input
+          type="checkbox"
+          value="est"
+          data-leaf-assignment
+          data-fingerprint="${escapeAttribute(certificate.fingerprint)}"
+          ${assignedServices.has("est") ? "checked" : ""}
+          ${disabled}
+        >
+        <span>EST Server</span>
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          value="webui"
+          data-leaf-assignment
+          data-fingerprint="${escapeAttribute(certificate.fingerprint)}"
+          ${assignedServices.has("webui") ? "checked" : ""}
+          ${disabled}
+        >
+        <span>WebUI</span>
+      </label>
+    </div>
+  `;
+}
+
+async function handleLeafAssignmentChange(input) {
+  const fingerprint = input?.dataset?.fingerprint;
+  if (!fingerprint) {
+    return;
+  }
+
+  if (!canManageCertificates()) {
+    showInlineNotice(leafCertificatesInlineNotice, "Only admin users can assign leaf certificates.", true);
+    await refreshLeafCertificates();
+    return;
+  }
+
+  const group = input.closest("[data-assignment-group]");
+  const assignedServices = Array.from(group?.querySelectorAll('input[data-leaf-assignment]:checked') || [])
+    .map((element) => element.value)
+    .sort();
+
+  try {
+    clearInlineNotice(leafCertificatesInlineNotice);
+    group?.querySelectorAll('input[data-leaf-assignment]').forEach((element) => {
+      element.disabled = true;
+    });
+
+    await fetchJson(`/api/certstore/leaf/${encodeURIComponent(fingerprint)}/assignment`, {
+      method: "POST",
+      body: JSON.stringify({ assigned_services: assignedServices }),
+    });
+
+    const certificate = state.leafCertificates.find((entry) => entry.fingerprint === fingerprint);
+    if (certificate) {
+      certificate.assigned_services = assignedServices;
+    }
+
+    showInlineNotice(leafCertificatesInlineNotice, "Leaf certificate assignment updated.");
+  } catch (error) {
+    console.error(error);
+    showInlineNotice(
+      leafCertificatesInlineNotice,
+      error.message || "Failed to update leaf certificate assignment.",
+      true
+    );
+    await refreshLeafCertificates();
+  } finally {
+    group?.querySelectorAll('input[data-leaf-assignment]').forEach((element) => {
+      element.disabled = !canManageCertificates();
+    });
+  }
 }
 
 async function handleUploadTrustedCa(event) {

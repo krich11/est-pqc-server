@@ -37,8 +37,8 @@ use tracing::{error, info, warn};
 use self::cert_store::{
     certificate_store_root, delete_leaf_certificate, delete_trusted_ca, get_leaf_certificate,
     get_trusted_ca, initialize_certificate_store, list_leaf_certificates, list_trusted_ca,
-    upload_leaf_certificate, upload_trusted_ca, CertificateDetail, CertificateSummary,
-    UploadLeafCertificateRequest, UploadTrustedCaRequest,
+    update_leaf_assignment, upload_leaf_certificate, upload_trusted_ca, CertificateDetail,
+    CertificateSummary, UploadLeafCertificateRequest, UploadTrustedCaRequest,
 };
 use crate::est::{
     self, EnrollmentArtifactSummary, EnrollmentConfig, PendingEnrollmentRecord,
@@ -123,6 +123,20 @@ struct WebUiUserSummary {
     enabled: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct OpenSslBinaryOption {
+    path: String,
+    version: Option<String>,
+    providers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenSslPlatformOptions {
+    selected_binary: String,
+    selected_providers: Vec<String>,
+    binaries: Vec<OpenSslBinaryOption>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RejectRequest {
     reason: Option<String>,
@@ -154,6 +168,11 @@ struct UpdateUserEnabledRequest {
 struct ChangeOwnPasswordRequest {
     current_password: String,
     new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateLeafAssignmentRequest {
+    assigned_services: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -199,6 +218,7 @@ pub async fn run_webui(config_path: PathBuf, config: ServerConfig) -> Result<()>
         .route("/app.js", get(static_asset))
         .route("/api/status", get(api_status))
         .route("/api/config", get(api_config).post(api_update_config))
+        .route("/api/platform/openssl", get(api_openssl_platform))
         .route(
             "/api/certstore/ca",
             get(api_list_trusted_ca).post(api_upload_trusted_ca),
@@ -214,6 +234,10 @@ pub async fn run_webui(config_path: PathBuf, config: ServerConfig) -> Result<()>
         .route(
             "/api/certstore/leaf/:fingerprint",
             get(api_get_leaf_certificate).delete(api_delete_leaf_certificate),
+        )
+        .route(
+            "/api/certstore/leaf/:fingerprint/assignment",
+            post(api_update_leaf_assignment),
         )
         .route("/api/rules", get(api_rules).post(api_update_rules))
         .route("/api/me", get(api_me))
@@ -412,6 +436,28 @@ async fn api_update_config(
     Ok(Json(payload))
 }
 
+async fn api_openssl_platform(
+    State(state): State<Arc<WebUiState>>,
+    headers: HeaderMap,
+) -> Result<Json<OpenSslPlatformOptions>, WebUiError> {
+    authenticate_user(&state, &headers)?;
+    let config = current_config(&state)?;
+    let binaries = est::discover_openssl_binaries(&config)
+        .into_iter()
+        .map(|path| OpenSslBinaryOption {
+            version: est::query_openssl_version(&path).ok(),
+            providers: est::query_openssl_providers(&path).unwrap_or_default(),
+            path,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(OpenSslPlatformOptions {
+        selected_binary: est::resolve_openssl_binary(&config),
+        selected_providers: est::effective_openssl_providers(&config),
+        binaries,
+    }))
+}
+
 async fn api_list_trusted_ca(
     State(state): State<Arc<WebUiState>>,
     headers: HeaderMap,
@@ -494,25 +540,25 @@ async fn api_upload_leaf_certificate(
 
     let filename = payload.filename.clone();
     let config = current_config(&state)?;
-    let openssl_binary = if config.openssl_binary.trim().is_empty() {
-        "openssl".to_owned()
-    } else {
-        config.openssl_binary
-    };
+    let openssl_binary = est::resolve_openssl_binary(&config);
+    let openssl_providers = est::effective_openssl_providers(&config);
 
-    let certificate =
-        upload_leaf_certificate(&state.certificate_store_path, payload, &openssl_binary).map_err(
-            |error| {
-                let message = error.to_string();
-                log_webui_failure(
-                    Some(&actor),
-                    "upload-leaf-certificate",
-                    &format!("filename={filename}"),
-                    &message,
-                );
-                WebUiError::Message(StatusCode::BAD_REQUEST, message)
-            },
-        )?;
+    let certificate = upload_leaf_certificate(
+        &state.certificate_store_path,
+        payload,
+        &openssl_binary,
+        &openssl_providers,
+    )
+    .map_err(|error| {
+        let message = error.to_string();
+        log_webui_failure(
+            Some(&actor),
+            "upload-leaf-certificate",
+            &format!("filename={filename}"),
+            &message,
+        );
+        WebUiError::Message(StatusCode::BAD_REQUEST, message)
+    })?;
     Ok(Json(certificate))
 }
 
@@ -545,6 +591,33 @@ async fn api_delete_leaf_certificate(
         internal_error(error)
     })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn api_update_leaf_assignment(
+    State(state): State<Arc<WebUiState>>,
+    headers: HeaderMap,
+    AxumPath(fingerprint): AxumPath<String>,
+    Json(payload): Json<UpdateLeafAssignmentRequest>,
+) -> Result<Json<CertificateSummary>, WebUiError> {
+    let actor = authenticate_user(&state, &headers)?;
+    ensure_admin(&actor)?;
+
+    let certificate = update_leaf_assignment(
+        &state.certificate_store_path,
+        &fingerprint,
+        &payload.assigned_services,
+    )
+    .map_err(|error| {
+        let message = error.to_string();
+        log_webui_failure(
+            Some(&actor),
+            "update-leaf-assignment",
+            &format!("fingerprint={fingerprint}"),
+            &message,
+        );
+        WebUiError::Message(StatusCode::BAD_REQUEST, message)
+    })?;
+    Ok(Json(certificate))
 }
 
 async fn api_rules(

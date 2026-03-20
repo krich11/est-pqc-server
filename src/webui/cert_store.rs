@@ -1,3 +1,4 @@
+use crate::est;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use openssl::{
@@ -33,14 +34,20 @@ pub struct UploadLeafCertificateRequest {
 pub struct CertificateSummary {
     pub fingerprint: String,
     pub original_filename: String,
+    #[serde(default = "default_common_name")]
+    pub common_name: String,
     pub subject: String,
     pub issuer: String,
     pub not_before: String,
     pub not_after: String,
+    #[serde(default)]
+    pub assigned_services: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedCertificate {
+    #[serde(default = "default_common_name")]
+    pub common_name: String,
     pub subject: String,
     pub issuer: String,
     pub serial_number: String,
@@ -73,6 +80,8 @@ struct StoredLeafMetadata {
     original_filename: String,
     leaf: DecodedCertificate,
     chain: Vec<DecodedCertificate>,
+    #[serde(default)]
+    assigned_services: Vec<String>,
 }
 
 pub fn certificate_store_root() -> PathBuf {
@@ -92,6 +101,12 @@ pub fn initialize_certificate_store(root: &Path) -> Result<()> {
             leaf_dir(root).display()
         )
     })?;
+    fs::create_dir_all(verification_log_dir(root)).with_context(|| {
+        format!(
+            "failed to create certificate verification log directory `{}`",
+            verification_log_dir(root).display()
+        )
+    })?;
     Ok(())
 }
 
@@ -101,10 +116,12 @@ pub fn list_trusted_ca(root: &Path) -> Result<Vec<CertificateSummary>> {
         .map(|(fingerprint, metadata)| CertificateSummary {
             fingerprint,
             original_filename: metadata.original_filename,
+            common_name: metadata.certificate.common_name,
             subject: metadata.certificate.subject,
             issuer: metadata.certificate.issuer,
             not_before: metadata.certificate.not_before,
             not_after: metadata.certificate.not_after,
+            assigned_services: Vec::new(),
         })
         .collect::<Vec<_>>();
 
@@ -157,10 +174,12 @@ pub fn upload_trusted_ca(
     Ok(CertificateSummary {
         fingerprint,
         original_filename: metadata.original_filename,
+        common_name: certificate_detail.common_name,
         subject: certificate_detail.subject,
         issuer: certificate_detail.issuer,
         not_before: certificate_detail.not_before,
         not_after: certificate_detail.not_after,
+        assigned_services: Vec::new(),
     })
 }
 
@@ -183,15 +202,19 @@ pub fn delete_trusted_ca(root: &Path, fingerprint: &str) -> Result<()> {
 pub fn list_leaf_certificates(root: &Path) -> Result<Vec<CertificateSummary>> {
     let mut entries = load_store_metadata::<StoredLeafMetadata>(&leaf_dir(root), "json")?
         .into_iter()
-        .map(|(fingerprint, metadata)| CertificateSummary {
-            fingerprint,
-            original_filename: metadata.original_filename,
-            subject: metadata.leaf.subject,
-            issuer: metadata.leaf.issuer,
-            not_before: metadata.leaf.not_before,
-            not_after: metadata.leaf.not_after,
+        .map(|(fingerprint, metadata)| {
+            Ok(CertificateSummary {
+                fingerprint,
+                original_filename: metadata.original_filename,
+                common_name: metadata.leaf.common_name,
+                subject: metadata.leaf.subject,
+                issuer: metadata.leaf.issuer,
+                not_before: metadata.leaf.not_before,
+                not_after: metadata.leaf.not_after,
+                assigned_services: normalize_assigned_services(&metadata.assigned_services)?,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     entries.sort_by(|left, right| {
         left.subject
@@ -206,6 +229,7 @@ pub fn upload_leaf_certificate(
     root: &Path,
     request: UploadLeafCertificateRequest,
     openssl_binary: &str,
+    openssl_providers: &[String],
 ) -> Result<CertificateSummary> {
     initialize_certificate_store(root)?;
 
@@ -231,8 +255,14 @@ pub fn upload_leaf_certificate(
         bail!(trust_error_message)
     }
 
-    validate_leaf_certificate_trust(root, openssl_binary, &leaf_certificate, &chain_certificates)
-        .with_context(|| trust_error_message.clone())?;
+    validate_leaf_certificate_trust(
+        root,
+        openssl_binary,
+        openssl_providers,
+        &leaf_certificate,
+        &chain_certificates,
+    )
+    .map_err(|error| anyhow!("{trust_error_message} Details: {error}"))?;
 
     let leaf_detail = decode_certificate(&leaf_certificate)?;
     let fingerprint = leaf_detail.fingerprint_sha256.clone();
@@ -279,16 +309,19 @@ pub fn upload_leaf_certificate(
         original_filename: request.filename,
         leaf: leaf_detail.clone(),
         chain: chain_details,
+        assigned_services: Vec::new(),
     };
     write_json_file(&leaf_metadata_path(root, &fingerprint), &metadata)?;
 
     Ok(CertificateSummary {
         fingerprint,
         original_filename: metadata.original_filename,
+        common_name: leaf_detail.common_name,
         subject: leaf_detail.subject,
         issuer: leaf_detail.issuer,
         not_before: leaf_detail.not_before,
         not_after: leaf_detail.not_after,
+        assigned_services: Vec::new(),
     })
 }
 
@@ -310,9 +343,31 @@ pub fn delete_leaf_certificate(root: &Path, fingerprint: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn update_leaf_assignment(
+    root: &Path,
+    fingerprint: &str,
+    assigned_services: &[String],
+) -> Result<CertificateSummary> {
+    let mut metadata: StoredLeafMetadata = read_json_file(&leaf_metadata_path(root, fingerprint))?;
+    metadata.assigned_services = normalize_assigned_services(assigned_services)?;
+    write_json_file(&leaf_metadata_path(root, fingerprint), &metadata)?;
+
+    Ok(CertificateSummary {
+        fingerprint: fingerprint.to_owned(),
+        original_filename: metadata.original_filename,
+        common_name: metadata.leaf.common_name,
+        subject: metadata.leaf.subject,
+        issuer: metadata.leaf.issuer,
+        not_before: metadata.leaf.not_before,
+        not_after: metadata.leaf.not_after,
+        assigned_services: metadata.assigned_services,
+    })
+}
+
 fn validate_leaf_certificate_trust(
     root: &Path,
     openssl_binary: &str,
+    openssl_providers: &[String],
     leaf_certificate: &X509,
     chain_certificates: &[X509],
 ) -> Result<()> {
@@ -324,16 +379,24 @@ fn validate_leaf_certificate_trust(
     let trusted_bundle_path = write_temp_file("trusted-ca-bundle", "pem", &trusted_bundle)?;
     let leaf_certificate_path =
         write_temp_file("leaf-certificate", "pem", &leaf_certificate.to_pem()?)?;
+    let trusted_ca_entries = trusted_ca_log_entries(root)?;
+    let leaf_summary = certificate_log_summary(leaf_certificate)?;
+    let mut included_chain_entries = Vec::new();
+    let mut skipped_self_signed_entries = Vec::new();
+
     let chain_path = if chain_certificates.is_empty() {
         None
     } else {
         let mut chain_pem = Vec::new();
 
         for certificate in chain_certificates {
+            let summary = certificate_log_summary(certificate)?;
             if is_self_signed_certificate(certificate)? {
+                skipped_self_signed_entries.push(summary);
                 continue;
             }
 
+            included_chain_entries.push(summary);
             chain_pem.extend(
                 certificate
                     .to_pem()
@@ -349,10 +412,9 @@ fn validate_leaf_certificate_trust(
     };
 
     let mut command = Command::new(openssl_binary);
-    command
-        .arg("verify")
-        .arg("-CAfile")
-        .arg(&trusted_bundle_path);
+    command.arg("verify");
+    est::append_openssl_provider_args(&mut command, openssl_binary, openssl_providers);
+    command.arg("-CAfile").arg(&trusted_bundle_path);
 
     if let Some(chain_path) = &chain_path {
         command.arg("-untrusted").arg(chain_path);
@@ -364,6 +426,21 @@ fn validate_leaf_certificate_trust(
         format!("failed to execute trust verification using `{openssl_binary}`")
     })?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let verification_log_path = write_leaf_verification_log(
+        root,
+        openssl_binary,
+        openssl_providers,
+        &leaf_summary,
+        &trusted_ca_entries,
+        &included_chain_entries,
+        &skipped_self_signed_entries,
+        &stdout,
+        &stderr,
+        output.status.success(),
+    )?;
+
     cleanup_temp_file(&trusted_bundle_path);
     cleanup_temp_file(&leaf_certificate_path);
     if let Some(chain_path) = &chain_path {
@@ -372,8 +449,10 @@ fn validate_leaf_certificate_trust(
 
     if !output.status.success() {
         bail!(
-            "leaf certificate trust verification failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "leaf certificate trust verification failed; verification log: {}; stdout: {}; stderr: {}",
+            verification_log_path.display(),
+            display_process_output(&stdout),
+            display_process_output(&stderr)
         );
     }
 
@@ -383,6 +462,125 @@ fn validate_leaf_certificate_trust(
 fn is_self_signed_certificate(certificate: &X509) -> Result<bool> {
     Ok(x509_name_to_string(certificate.subject_name())?
         == x509_name_to_string(certificate.issuer_name())?)
+}
+
+fn certificate_log_summary(certificate: &X509) -> Result<String> {
+    Ok(format!(
+        "subject={}; issuer={}; serial={}; fingerprint_sha256={}",
+        x509_name_to_string(certificate.subject_name())?,
+        x509_name_to_string(certificate.issuer_name())?,
+        certificate
+            .serial_number()
+            .to_bn()
+            .context("failed to extract certificate serial number for verification log")?
+            .to_hex_str()
+            .context("failed to format certificate serial number for verification log")?,
+        fingerprint_hex(certificate)?,
+    ))
+}
+
+fn trusted_ca_log_entries(root: &Path) -> Result<Vec<String>> {
+    let mut entries = load_store_metadata::<StoredCaMetadata>(&trusted_ca_dir(root), "json")?
+        .into_iter()
+        .map(|(fingerprint, metadata)| {
+            format!(
+                "fingerprint={fingerprint}; original_filename={}; subject={}; issuer={}",
+                metadata.original_filename,
+                metadata.certificate.subject,
+                metadata.certificate.issuer
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    Ok(entries)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_leaf_verification_log(
+    root: &Path,
+    openssl_binary: &str,
+    openssl_providers: &[String],
+    leaf_summary: &str,
+    trusted_ca_entries: &[String],
+    included_chain_entries: &[String],
+    skipped_self_signed_entries: &[String],
+    stdout: &str,
+    stderr: &str,
+    success: bool,
+) -> Result<PathBuf> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let path = verification_log_dir(root).join(format!("leaf-verify-{stamp}.log"));
+
+    let mut content = String::new();
+    content.push_str(&format!("timestamp_unix_nanos={stamp}\n"));
+    content.push_str(&format!("openssl_binary={openssl_binary}\n"));
+    content.push_str(&format!(
+        "openssl_providers={}\n",
+        if openssl_providers.is_empty() {
+            "(none)".to_owned()
+        } else {
+            openssl_providers.join(",")
+        }
+    ));
+    content.push_str(&format!("success={success}\n\n"));
+    content.push_str("[leaf]\n");
+    content.push_str(leaf_summary);
+    content.push_str("\n\n[trusted_ca_store]\n");
+    if trusted_ca_entries.is_empty() {
+        content.push_str("(empty)\n");
+    } else {
+        for entry in trusted_ca_entries {
+            content.push_str(entry);
+            content.push('\n');
+        }
+    }
+    content.push_str("\n[provided_chain_used_as_untrusted]\n");
+    if included_chain_entries.is_empty() {
+        content.push_str("(none)\n");
+    } else {
+        for entry in included_chain_entries {
+            content.push_str(entry);
+            content.push('\n');
+        }
+    }
+    content.push_str("\n[provided_chain_skipped_as_self_signed]\n");
+    if skipped_self_signed_entries.is_empty() {
+        content.push_str("(none)\n");
+    } else {
+        for entry in skipped_self_signed_entries {
+            content.push_str(entry);
+            content.push('\n');
+        }
+    }
+    content.push_str("\n[openssl_verify_stdout]\n");
+    content.push_str(display_process_output(stdout));
+    content.push_str("\n\n[openssl_verify_stderr]\n");
+    content.push_str(display_process_output(stderr));
+    content.push('\n');
+
+    fs::write(&path, &content)
+        .with_context(|| format!("failed to write leaf verification log `{}`", path.display()))?;
+
+    let latest_path = verification_log_dir(root).join("leaf-verify-latest.log");
+    fs::write(&latest_path, &content).with_context(|| {
+        format!(
+            "failed to write leaf verification log `{}`",
+            latest_path.display()
+        )
+    })?;
+
+    Ok(path)
+}
+
+fn display_process_output(output: &str) -> &str {
+    if output.trim().is_empty() {
+        "<empty>"
+    } else {
+        output
+    }
 }
 
 fn trusted_ca_bundle(root: &Path) -> Result<Vec<u8>> {
@@ -439,6 +637,7 @@ fn decode_certificate(certificate: &X509) -> Result<DecodedCertificate> {
     }
 
     Ok(DecodedCertificate {
+        common_name: extract_common_name(certificate.subject_name())?,
         subject: x509_name_to_string(certificate.subject_name())?,
         issuer: x509_name_to_string(certificate.issuer_name())?,
         serial_number: certificate
@@ -472,6 +671,50 @@ fn fingerprint_hex(certificate: &X509) -> Result<String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>())
+}
+
+fn default_common_name() -> String {
+    "—".to_owned()
+}
+
+fn extract_common_name(name: &X509NameRef) -> Result<String> {
+    for entry in name.entries() {
+        let short_name = entry.object().nid().short_name().unwrap_or("UNKNOWN");
+        if short_name != "CN" {
+            continue;
+        }
+
+        let value = entry
+            .data()
+            .as_utf8()
+            .map(|value| value.to_string())
+            .context("failed to decode X.509 common name as UTF-8")?;
+        return Ok(value);
+    }
+
+    Ok(default_common_name())
+}
+
+fn normalize_assigned_services(assigned_services: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::new();
+
+    for service in assigned_services {
+        let value = service.trim().to_ascii_lowercase();
+        if value.is_empty() {
+            continue;
+        }
+
+        if !matches!(value.as_str(), "est" | "webui") {
+            bail!("unsupported leaf certificate assignment `{value}`");
+        }
+
+        if !normalized.iter().any(|entry| entry == &value) {
+            normalized.push(value);
+        }
+    }
+
+    normalized.sort();
+    Ok(normalized)
 }
 
 fn x509_name_to_string(name: &X509NameRef) -> Result<String> {
@@ -562,6 +805,10 @@ fn trusted_ca_dir(root: &Path) -> PathBuf {
 
 fn leaf_dir(root: &Path) -> PathBuf {
     root.join("leaf")
+}
+
+fn verification_log_dir(root: &Path) -> PathBuf {
+    root.join("verification")
 }
 
 fn trusted_ca_pem_path(root: &Path, fingerprint: &str) -> PathBuf {

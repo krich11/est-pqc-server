@@ -314,19 +314,19 @@
               <button class="config-group-header collapsible-trigger" type="button" data-config-collapse="platform">
                 <div>
                   <h4>Platform</h4>
-                  <p class="muted">OpenSSL paths and capability flags detected for the runtime environment.</p>
+                  <p class="muted">Discovered OpenSSL binaries, selected providers, and runtime capability flags.</p>
                 </div>
                 <span class="collapse-indicator">▾</span>
               </button>
               <div class="config-group-body">
                 <div class="config-field-grid">
                   <label class="field">
-                    <span>OpenSSL dir</span>
-                    <input id="config-openssl-dir" data-config-path="openssl_dir" type="text">
+                    <span>OpenSSL binary</span>
+                    <select id="config-openssl-binary-select"></select>
                   </label>
                   <label class="field">
-                    <span>OpenSSL binary</span>
-                    <input id="config-openssl-binary" data-config-path="openssl_binary" type="text">
+                    <span>OpenSSL dir (legacy fallback)</span>
+                    <input id="config-openssl-dir" data-config-path="openssl_dir" type="text">
                   </label>
                   <label class="field checkbox-field">
                     <span>ML-KEM supported</span>
@@ -336,6 +336,12 @@
                     <span>ML-DSA supported</span>
                     <input id="config-ml-dsa-supported" data-config-path="ml_dsa_supported" type="checkbox">
                   </label>
+                </div>
+                <div class="stack-form">
+                  <div class="field">
+                    <span>OpenSSL providers</span>
+                    <div id="config-openssl-providers" class="checkbox-list"></div>
+                  </div>
                 </div>
               </div>
             </section>
@@ -361,7 +367,7 @@
                     ⓘ
                   </button>
                 </div>
-                <p class="muted">Load PEM CA certificates used to validate imported P12 leaf certificates.</p>
+                <p class="muted">Load PEM CA certificates used to validate imported P12 leaf certificates. Subject and issuer are expected to match for these trust anchors.</p>
               </div>
               <button id="reload-trusted-ca-button" class="secondary-button" type="button">Reload</button>
             </div>
@@ -380,8 +386,8 @@
               <table class="data-table">
                 <thead>
                   <tr>
+                    <th>Common Name</th>
                     <th>Subject</th>
-                    <th>Issuer</th>
                     <th>Expires</th>
                     <th>Fingerprint</th>
                     <th>Actions</th>
@@ -400,7 +406,7 @@
             <div class="panel-header">
               <div>
                 <h3>Leaf Certificates</h3>
-                <p class="muted">Load P12 bundles for EST and WebUI leaf certificates after the issuing Trusted CA is present.</p>
+                <p class="muted">Load P12 bundles for EST and WebUI leaf certificates after the issuing Trusted CA is present, then assign each imported leaf certificate to EST, the WebUI, or both.</p>
               </div>
               <button id="reload-leaf-certificates-button" class="secondary-button" type="button">Reload</button>
             </div>
@@ -423,16 +429,18 @@
               <table class="data-table">
                 <thead>
                   <tr>
+                    <th>Common Name</th>
                     <th>Subject</th>
                     <th>Issuer</th>
                     <th>Expires</th>
                     <th>Fingerprint</th>
+                    <th>Assignment</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody id="leaf-certificates-table-body">
                   <tr>
-                    <td colspan="5" class="muted">Loading…</td>
+                    <td colspan="7" class="muted">Loading…</td>
                   </tr>
                 </tbody>
               </table>
@@ -697,6 +705,7 @@
     <ul>
       <li>Each section can be collapsed or expanded independently.</li>
       <li><strong>Save Configuration</strong> writes the current GUI values back to <code>config.toml</code>.</li>
+      <li>The Platform section auto-discovers OpenSSL binaries and lets you choose one plus one or more installed providers.</li>
       <li>Readonly fields reflect values managed by other views.</li>
     </ul>
   </template>

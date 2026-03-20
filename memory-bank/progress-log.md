@@ -72,6 +72,8 @@ Bootstrap, Linux-hosted RFC 7030 EST validation, exhaustive QA, RPM packaging, a
 - Added editable WebUI configuration persistence through `POST /api/config`
 - Updated the configuration view to use collapsible sections with persisted collapse state
 - Added WebUI certificate store navigation, upload flows, delete flows, and certificate detail drawer rendering
+- Updated the certificate store tables so Trusted CA shows `Common Name` first and omits redundant issuer display for self-signed trust anchors
+- Added per-leaf certificate service assignment state for `est`, `webui`, or both, persisted in certificate-store metadata and editable from the WebUI
 
 ## Validation Results
 Validated successfully with:
@@ -184,6 +186,20 @@ ml_dsa_supported = false
 - The WebUI now exposes a certificate store concept with two sections:
   - Trusted CA
   - Leaf Certificates
+- Trusted CA table now displays:
+  - Common Name
+  - Subject
+  - Expires
+  - Fingerprint
+  - Actions
+- Leaf certificate table now displays:
+  - Common Name
+  - Subject
+  - Issuer
+  - Expires
+  - Fingerprint
+  - Assignment
+  - Actions
 - Trusted CA uploads accept PEM certificates only and persist decoded metadata for browsing.
 - Leaf certificate uploads accept P12 bundles only and are validated against the Trusted CA store before import.
 - If no trust can be established during P12 import, the WebUI returns the operator message:
@@ -213,6 +229,9 @@ ml_dsa_supported = false
   - showing a read-only badge
   - hiding or disabling write controls
   - keeping view access available across the WebUI
+- Leaf certificate assignments are now stored in certificate-store metadata JSON and can be toggled directly in the WebUI with checkbox controls for:
+  - EST Server
+  - WebUI
 
 ## Latest Validation
 - Local validation passed:
@@ -220,6 +239,11 @@ ml_dsa_supported = false
   - `cargo check`
   - `cargo fmt --all --check`
   - `cargo clippy --all-targets -- -D warnings`
+  - `cargo fmt --all`
+  - `cargo check`
+  - `cargo test`
+  - `cargo clippy --all-targets -- -D warnings`
+  - `node --check webui/static/app.js`
 - QA deployment completed on `192.168.200.120`:
   - synced workspace to `/home/krich/src/est-rust-server`
   - rebuilt release binary remotely
@@ -231,6 +255,7 @@ ml_dsa_supported = false
   - `webui-certs`
   - `webui-systemd`
   - `webui-gui`
+  - `bash scripts/run-regression-tests.sh webui-certs`
 - Evidence file:
   - `test-results/regression-role-layout-report.md`
 

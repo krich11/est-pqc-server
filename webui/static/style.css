@@ -486,6 +486,27 @@ strong {
   padding: 8px 12px;
 }
 
+.assignment-checkboxes {
+  display: grid;
+  gap: 8px;
+  min-width: 170px;
+}
+
+.assignment-checkboxes label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.assignment-checkboxes input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .view {
   display: none;
 }

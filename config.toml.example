@@ -19,6 +19,7 @@
 # - Relative paths are resolved from the current working directory.
 # - This sample assumes the process is started from the repository root.
 # - The values below are intentionally set to a known-good demo configuration.
+# - OpenSSL binaries are now auto-discovered; `openssl_binary` stores the selected binary.
 
 # Address to bind for incoming EST HTTPS traffic.
 listen_address = "0.0.0.0"
@@ -48,13 +49,17 @@ key_type = "rsa2048"
 # Enable FIPS mode if the active system OpenSSL provider set supports it.
 enable_fips = false
 
-# OpenSSL installation root.
-# This may be used for environment detection and fallback binary resolution.
-openssl_dir = "/usr"
+# Optional legacy OpenSSL installation root.
+# Leave empty for automatic discovery from OPENSSL or PATH.
+openssl_dir = ""
 
-# OpenSSL CLI binary used for PKCS#7, CMS, CSR, and certificate operations.
-# Using "openssl" allows the system PATH to supply the correct binary.
+# Selected OpenSSL CLI binary used for PKCS#7, CMS, CSR, and certificate operations.
+# Using "openssl" allows the system PATH to supply the discovered binary.
 openssl_binary = "openssl"
+
+# Selected OpenSSL providers passed to CLI-backed operations.
+# Choose one or more provider names discovered on the host, such as "default" or "fips".
+openssl_providers = ["default"]
 
 # Issuing CA certificate used for cacerts responses and EST-issued certificate chains.
 ca_certificate_path = "demo/demo-ca.crt"

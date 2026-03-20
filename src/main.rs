@@ -26,7 +26,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const DEFAULT_OPENSSL_DIR: &str = "/opt/homebrew/opt/openssl@3.5";
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 const DEFAULT_LOG_PATH: &str = "logs/env-check.log";
 const TLS_VERSION: &str = "TLS1.3";
@@ -77,6 +76,13 @@ struct Cli {
 
     #[arg(long, help = "Override OpenSSL CLI binary path")]
     openssl_binary: Option<String>,
+
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Override selected OpenSSL providers as a comma-separated list"
+    )]
+    openssl_providers: Option<Vec<String>>,
 
     #[arg(long, help = "Override issuing CA certificate path")]
     ca_certificate_path: Option<String>,
@@ -223,6 +229,7 @@ struct EnvironmentReport {
     cli_openssl_version: String,
     openssl_binary: String,
     openssl_dir: String,
+    available_binaries: Vec<String>,
     architecture: String,
     operating_system: String,
     pkg_config_available: bool,
@@ -324,6 +331,7 @@ impl Cli {
             enable_fips: self.enable_fips,
             openssl_dir: self.openssl_dir.clone(),
             openssl_binary: self.openssl_binary.clone(),
+            openssl_providers: self.openssl_providers.clone(),
             ca_certificate_path: self.ca_certificate_path.clone(),
             ca_private_key_path: self.ca_private_key_path.clone(),
             client_auth_ca_certificate_path: self.client_auth_ca_certificate_path.clone(),
@@ -391,22 +399,24 @@ fn detect_environment() -> Result<EnvironmentReport> {
         bail!("OpenSSL 3.x is required at runtime, detected `{runtime_openssl_version}`");
     }
 
-    let openssl_dir = detect_openssl_dir();
-    let openssl_binary = detect_openssl_binary(&openssl_dir)?;
-    let cli_openssl_version = run_command(&openssl_binary, &["version"])
+    let discovery_config = est::ServerConfig::default();
+    let available_binaries = est::discover_openssl_binaries(&discovery_config);
+    let openssl_binary = available_binaries
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "openssl".to_owned());
+    let cli_openssl_version = est::query_openssl_version(&openssl_binary)
         .with_context(|| format!("failed to query `{openssl_binary} version`"))?;
 
     if !cli_openssl_version.starts_with("OpenSSL 3.") {
         bail!("OpenSSL 3.x is required from the CLI, detected `{cli_openssl_version}`");
     }
 
-    let providers_output =
-        run_command(&openssl_binary, &["list", "-providers"]).unwrap_or_default();
+    let providers = est::query_openssl_providers(&openssl_binary).unwrap_or_default();
     let kem_output = run_command(&openssl_binary, &["list", "-kem-algorithms"]).unwrap_or_default();
     let signature_output =
         run_command(&openssl_binary, &["list", "-signature-algorithms"]).unwrap_or_default();
 
-    let providers = collect_meaningful_lines(&providers_output);
     let kem_algorithms = collect_meaningful_lines(&kem_output);
     let signature_algorithms = collect_meaningful_lines(&signature_output);
 
@@ -433,10 +443,27 @@ fn detect_environment() -> Result<EnvironmentReport> {
         .map(|output| output.status.success())
         .unwrap_or(false);
 
+    let openssl_dir = Path::new(&openssl_binary)
+        .parent()
+        .and_then(|value| value.parent())
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let library_paths_present = detect_library_paths(&openssl_dir);
 
     let mut issues = Vec::new();
     let mut recommendations = Vec::new();
+
+    if available_binaries.is_empty() {
+        push_unique(
+            &mut issues,
+            "no OpenSSL CLI binary was discovered automatically".to_owned(),
+        );
+        push_unique(
+            &mut recommendations,
+            "Install a system OpenSSL 3 CLI package or set OPENSSL / openssl_binary explicitly"
+                .to_owned(),
+        );
+    }
 
     if !pkg_config_available {
         push_unique(
@@ -519,12 +546,13 @@ fn detect_environment() -> Result<EnvironmentReport> {
     {
         push_unique(
             &mut issues,
-            "system libssl library path was not detected under the configured OpenSSL directory"
+            "system libssl library path was not detected near the discovered OpenSSL binary"
                 .to_owned(),
         );
         push_unique(
             &mut recommendations,
-            format!("Verify that `{openssl_dir}` points to the system OpenSSL 3 installation"),
+            "Verify that the selected OpenSSL binary belongs to the intended system OpenSSL 3 installation"
+                .to_owned(),
         );
     }
 
@@ -542,18 +570,21 @@ fn detect_environment() -> Result<EnvironmentReport> {
         );
     }
 
-    push_unique(
-        &mut recommendations,
-        format!(
-            "Export OPENSSL_DIR={openssl_dir} and PKG_CONFIG_PATH={openssl_dir}/lib/pkgconfig before release builds"
-        ),
-    );
+    if !openssl_dir.is_empty() {
+        push_unique(
+            &mut recommendations,
+            format!(
+                "Export OPENSSL_DIR={openssl_dir} and PKG_CONFIG_PATH={openssl_dir}/lib/pkgconfig before release builds"
+            ),
+        );
+    }
 
     Ok(EnvironmentReport {
         runtime_openssl_version,
         cli_openssl_version,
         openssl_binary,
         openssl_dir,
+        available_binaries,
         architecture: env::consts::ARCH.to_owned(),
         operating_system: env::consts::OS.to_owned(),
         pkg_config_available,
@@ -568,27 +599,6 @@ fn detect_environment() -> Result<EnvironmentReport> {
         issues,
         recommendations,
     })
-}
-
-fn detect_openssl_dir() -> String {
-    if let Ok(value) = env::var("OPENSSL_DIR") {
-        return value;
-    }
-
-    DEFAULT_OPENSSL_DIR.to_owned()
-}
-
-fn detect_openssl_binary(openssl_dir: &str) -> Result<String> {
-    if let Ok(value) = env::var("OPENSSL") {
-        return Ok(value);
-    }
-
-    let configured = Path::new(openssl_dir).join("bin").join("openssl");
-    if configured.exists() {
-        return Ok(configured.to_string_lossy().into_owned());
-    }
-
-    Ok("openssl".to_owned())
 }
 
 fn run_command(binary: &str, args: &[&str]) -> Result<String> {
@@ -878,6 +888,15 @@ fn prompt_for_configuration(report: &EnvironmentReport) -> Result<est::ServerCon
         enable_fips,
         openssl_dir: report.openssl_dir.clone(),
         openssl_binary: report.openssl_binary.clone(),
+        openssl_providers: if report
+            .providers
+            .iter()
+            .any(|provider| provider.eq_ignore_ascii_case("default"))
+        {
+            vec!["default".to_owned()]
+        } else {
+            Vec::new()
+        },
         ca_certificate_path,
         ca_private_key_path,
         client_auth_ca_certificate_path,
@@ -915,6 +934,15 @@ fn default_configuration(report: &EnvironmentReport) -> est::ServerConfig {
         enable_fips: false,
         openssl_dir: report.openssl_dir.clone(),
         openssl_binary: report.openssl_binary.clone(),
+        openssl_providers: if report
+            .providers
+            .iter()
+            .any(|provider| provider.eq_ignore_ascii_case("default"))
+        {
+            vec!["default".to_owned()]
+        } else {
+            Vec::new()
+        },
         ca_certificate_path: "demo/demo-ca.crt".to_owned(),
         ca_private_key_path: "demo/demo-ca.key".to_owned(),
         client_auth_ca_certificate_path: "demo/demo-ca.crt".to_owned(),
@@ -958,6 +986,9 @@ fn apply_cli_overrides_to_config(
     }
     if let Some(value) = &overrides.openssl_binary {
         config.openssl_binary.clone_from(value);
+    }
+    if let Some(value) = &overrides.openssl_providers {
+        config.openssl_providers = value.clone();
     }
     if let Some(value) = &overrides.ca_certificate_path {
         config.ca_certificate_path.clone_from(value);
@@ -1125,6 +1156,11 @@ fn append_environment_log(report: &EnvironmentReport, config: &est::ServerConfig
     )?;
     writeln!(log_file, "openssl_binary = {}", report.openssl_binary)?;
     writeln!(log_file, "openssl_dir = {}", report.openssl_dir)?;
+    writeln!(
+        log_file,
+        "available_binaries = {}",
+        report.available_binaries.join(" | ")
+    )?;
     writeln!(log_file, "architecture = {}", report.architecture)?;
     writeln!(log_file, "operating_system = {}", report.operating_system)?;
     writeln!(

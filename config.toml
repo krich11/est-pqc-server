@@ -4,8 +4,9 @@ tls_version = "TLS1.3"
 preferred_tls_cipher_suite = "TLS_AES_256_GCM_SHA384"
 key_type = "rsa2048"
 enable_fips = false
-openssl_dir = "/opt/homebrew/opt/openssl@3.5"
-openssl_binary = "/opt/homebrew/opt/openssl@3.5/bin/openssl"
+openssl_dir = ""
+openssl_binary = "openssl"
+openssl_providers = ["default"]
 ca_certificate_path = "demo/demo-ca.crt"
 ca_private_key_path = "demo/demo-ca.key"
 client_auth_ca_certificate_path = "demo/demo-ca.crt"
@@ -17,3 +18,26 @@ max_request_body_bytes = 1048576
 default_retry_after_seconds = 60
 ml_kem_supported = true
 ml_dsa_supported = false
+
+[webui]
+enabled = true
+listen_address = "0.0.0.0"
+listen_port = 9443
+tls_certificate_path = "demo/rsa-2048-server.crt"
+tls_private_key_path = "demo/rsa-2048-server.key"
+auth_mode = "basic"
+admin_username = "admin"
+admin_password_hash = "$argon2id$v=19$m=19456,t=2,p=1$VRUPCgBrVELjPii4IB4GBQ$3IsfqTxBcWbQPziNjKF5ZaM+WLtWT9RddlUSFDmZo8k"
+systemd_unit_name = "est-server"
+
+[[webui.users]]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$VRUPCgBrVELjPii4IB4GBQ$3IsfqTxBcWbQPziNjKF5ZaM+WLtWT9RddlUSFDmZo8k"
+role = "super-admin"
+enabled = true
+
+[[webui.users]]
+username = "krich"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$QOZpp4fQ6QmxqKTOih5DAw$uVZhygTJlXhfGEQ8WL/lFGjJi3EqEs1bSolj+oczK8k"
+role = "admin"
+enabled = true
